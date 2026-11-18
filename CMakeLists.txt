@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(GakuFSR4 LANGUAGES CXX)
 enable_testing()
-add_library(GakuFSR4 SHARED src/GakuFSR4.cpp src/NoPresent.cpp)
+add_library(gaku_imgui STATIC
+  vendor/imgui/imgui.cpp vendor/imgui/imgui_draw.cpp
+  vendor/imgui/imgui_tables.cpp vendor/imgui/imgui_widgets.cpp)
+target_include_directories(gaku_imgui PUBLIC vendor/imgui)
+set_property(TARGET gaku_imgui PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+add_library(GakuFSR4 SHARED src/GakuFSR4.cpp src/NoPresent.cpp src/SettingsUi.cpp)
 target_compile_features(GakuFSR4 PRIVATE cxx_std_17)
 target_include_directories(GakuFSR4 PRIVATE include
   vendor/ghpc/ffx/Kits/FidelityFX/api/include
@@ -9,7 +14,7 @@ target_include_directories(GakuFSR4 PRIVATE include
   vendor/ghpc/ffx/Kits/FidelityFX/framegeneration/include)
 target_compile_definitions(GakuFSR4 PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE PUBLIC=1)
 target_compile_options(GakuFSR4 PRIVATE /W4 /EHa /utf-8)
-target_link_libraries(GakuFSR4 PRIVATE d3d11 d3d12 dxgi winmm)
+target_link_libraries(GakuFSR4 PRIVATE d3d11 d3d12 dxgi winmm gaku_imgui)
 set_property(TARGET GakuFSR4 PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 add_executable(test_math src/test_math.cpp)
 target_compile_features(test_math PRIVATE cxx_std_17)
@@ -20,6 +25,8 @@ target_compile_features(test_gpu PRIVATE cxx_std_17)
 target_link_libraries(test_gpu PRIVATE d3d11)
 add_executable(test_plugin src/test_plugin.cpp)
 target_include_directories(test_plugin PRIVATE include)
+target_link_libraries(test_plugin PRIVATE gaku_imgui)
+set_property(TARGET test_plugin PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 add_executable(test_plugin_event src/test_plugin_event.cpp)
 target_compile_features(test_plugin_event PRIVATE cxx_std_17)
 add_test(NAME plugin_event_binding COMMAND test_plugin_event)

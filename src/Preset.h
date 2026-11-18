@@ -1,11 +1,21 @@
 #pragma once
 #include <wchar.h>
 
+inline constexpr struct FsrPreset {
+    const wchar_t* key;
+    const char* label;
+    float ratio;
+} FsrPresets[]{
+    {L"NativeAA","Native AA",1.0f},
+    {L"Quality","Quality",1.5f},
+    {L"Balanced","Balanced",1.7f},
+    {L"Performance","Performance",2.0f},
+    {L"UltraPerformance","Ultra Performance",3.0f},
+};
+
 inline float PresetRatio(const wchar_t* name) {
-    if (!_wcsicmp(name, L"NativeAA")) return 1.0f;
-    if (!_wcsicmp(name, L"Quality")) return 1.5f;
-    if (!_wcsicmp(name, L"Balanced")) return 1.7f;
-    if (!_wcsicmp(name, L"Performance")) return 2.0f;
-    if (!_wcsicmp(name, L"UltraPerformance")) return 3.0f;
+    for (const auto& preset : FsrPresets) {
+        if (!_wcsicmp(name,preset.key)) return preset.ratio;
+    }
     return 0.0f;
 }

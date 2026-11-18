@@ -25,6 +25,12 @@ The GakuFSR4 integration source is distributed under GPL-3.0 as well. AMD runtim
 - MIT license: include/GakuMotion-MIT-LICENSE.txt.
 - Loader project: https://github.com/Gaku-Mod-Tools/GakuLoader
 
+## Dear ImGui
+
+- https://github.com/ocornut/imgui
+- Version 1.89.4, from the same GakuMotion snapshot as the ABI header.
+- MIT license: vendor/imgui/LICENSE.txt.
+
 ## Unity rendering references
 
 The integration was written against the target game's metadata and informed by Unity's URP 2022.3/staging rendering source. Unity source files are not compiled into this plugin.
