@@ -34,7 +34,9 @@ int wmain(int argc,wchar_t** argv) {
     const bool nativeAA=argc==4&&wcscmp(argv[3],L"--native-aa")==0;
     const bool quality=argc==4&&wcscmp(argv[3],L"--quality")==0;
     const bool fgScaled=argc==4&&wcscmp(argv[3],L"--fg-scaled")==0;
-    const bool fg=fgScaled||(argc==4&&wcscmp(argv[3],L"--fg")==0);
+    const bool fgLetterbox=argc==4&&wcscmp(argv[3],L"--fg-letterbox")==0;
+    const bool fgResized=fgScaled||fgLetterbox;
+    const bool fg=fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
     if(argc==4&&!portrait&&!fg) return 2;
     auto dll=LoadLibraryW(argv[1]);if(!dll) return 3;
@@ -56,8 +58,8 @@ int wmain(int argc,wchar_t** argv) {
             d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.BindFlags=bind;
             ComPtr<ID3D11Texture2D> t;Check(device->CreateTexture2D(&d,nullptr,&t));return t;
         };
-        const int dw=(fgScaled||nativeAA||quality)?2160:fg?540:portrait?1080:1920;
-        const int dh=(fgScaled||nativeAA||quality)?3840:fg?960:portrait?1920:1080;
+        const int dw=fgLetterbox?3840:(fgScaled||nativeAA||quality)?2160:fg?960:portrait?1080:1920;
+        const int dh=fgLetterbox?1634:(fgScaled||nativeAA||quality)?3840:fg?540:portrait?1920:1080;
         const int w=nativeAA?dw:dw*2/3,h=nativeAA?dh:dh*2/3;
         auto color=make(w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
         auto depth=make(w,h,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
@@ -89,9 +91,12 @@ int wmain(int argc,wchar_t** argv) {
             Check(dxgi->GetAdapter(&adapter));
             Check(adapter->GetParent(IID_PPV_ARGS(&factory)));
             DXGI_SWAP_CHAIN_DESC1 desc{};
-            desc.Width=fgScaled?dw/2:dw;desc.Height=fgScaled?dh/2:dh;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.Width=fgResized?dw/2:dw;
+            desc.Height=fgLetterbox?1080:fgScaled?dh/2:dh;
+            desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
             desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            if(fgLetterbox) desc.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
             Check(factory->CreateSwapChainForHwnd(device.Get(),window,&desc,nullptr,nullptr,&swapChain));
             ShowWindow(window,SW_SHOWNOACTIVATE);
             fd.fg=1;fd.frameTimeMs=50;
@@ -114,15 +119,20 @@ int wmain(int argc,wchar_t** argv) {
             UINT before=0,after=0;
             Check(swapChain->GetLastPresentCount(&before));
             DXGI_PRESENT_PARAMETERS parameters{};
-            const UINT sync=fgScaled?2:1;
-            Check(i%2==0?swapChain->Present(sync,0):swapChain->Present1(sync,0,&parameters));
+            const UINT sync=fgLetterbox?0:fgScaled?2:1;
+            const UINT flags=fgLetterbox?DXGI_PRESENT_ALLOW_TEARING:0;
+            Check(i%2==0?swapChain->Present(sync,flags):swapChain->Present1(sync,flags,&parameters));
             Check(swapChain->GetLastPresentCount(&after));
             presentCalls[i]=after-before;
         }
         bool reducedFgSize=false;
+        bool letterboxViewport=false;
+        bool synchronizedPair=false;
         char log[1024];while(poll(log,sizeof log)>0) {
             puts(log);
             reducedFgSize|=strstr(log,"FG context: inputs up to 1440x2560, display 1440x2560")!=nullptr;
+            letterboxViewport|=strstr(log,"FG centered viewport: 0,131 1920x817 in 1920x1080.")!=nullptr;
+            synchronizedPair|=strstr(log,"FG synchronizes flip-model frame pairs to vblank.")!=nullptr;
         }
         Stats s{};stats(&s);
         printf("frames=%llu, provider=%s, result=%d, failed=%d\n",s.frames,s.provider,s.lastResult,s.failed);
@@ -131,10 +141,11 @@ int wmain(int argc,wchar_t** argv) {
             printf("FG provider=%s, prepared=%llu, generated=%llu, real=%llu, Presents/frame=%u,%u,%u,%u,%u\n",
                 s.fgProvider,s.fgPrepared,s.fgGenerated,s.fgReal,
                 presentCalls[0],presentCalls[1],presentCalls[2],presentCalls[3],presentCalls[4]);
-            const uint64_t expectedGenerated=fgScaled?2:3;
+            const uint64_t expectedGenerated=fgResized?2:3;
             if(strncmp(s.fgProvider,"4.0.2",5)||s.fgPrepared!=frameCount||s.fgGenerated!=expectedGenerated||
-               s.fgReal!=expectedGenerated||reducedFgSize!=fgScaled||presentCalls[0]!=1||
-               presentCalls[1]!=(fgScaled?1u:2u)||presentCalls[2]!=2||presentCalls[3]!=2||presentCalls[4]!=1) return 9;
+               s.fgReal!=expectedGenerated||reducedFgSize!=fgScaled||letterboxViewport!=fgLetterbox||
+               synchronizedPair!=fgLetterbox||presentCalls[0]!=1||
+               presentCalls[1]!=(fgResized?1u:2u)||presentCalls[2]!=2||presentCalls[3]!=2||presentCalls[4]!=1) return 9;
             swapChain.Reset();
             DestroyWindow(window);
         }

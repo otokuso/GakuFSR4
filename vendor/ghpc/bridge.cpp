@@ -184,6 +184,11 @@ namespace
 		}
 	};
 
+	struct ImageRect
+	{
+		UINT x, y, width, height;
+	};
+
 	const int Slots = 6;
 	const DWORD FrameWaitMs = 2000, IdleWaitMs = 5000;
 
@@ -236,7 +241,7 @@ namespace
 		uint32_t fgDisplayW = 0, fgDisplayH = 0, fgRenderW = 0, fgRenderH = 0, fgFlags = 0;
 		bool fgProvidersListed = false;
 		bool fgUnavailable = false;
-		UINT fgBackbufferW = 0, fgBackbufferH = 0;
+		ImageRect fgContent{};
 		UINT fgSceneW = 0, fgSceneH = 0;
 		Shared present, gen, fgColor, fgOutput;
 		ComPtr<ID3D12RootSignature> scaleRs;
@@ -445,7 +450,7 @@ namespace
 		g.d11.Reset();
 		g.d11Base = nullptr;
 		g.fgCrossThread = false;
-		g.fgBackbufferW = g.fgBackbufferH = 0;
+		g.fgContent = {};
 		g.inValue = g.outValue = 0;
 		g.expValue = 0;
 		g.providersListed = false;
@@ -710,13 +715,22 @@ namespace
 Texture2D<float4> src : register(t0);
 SamplerState linearClamp : register(s0);
 RWTexture2D<float4> dst : register(u0);
+cbuffer Rectangles : register(b0)
+{
+	uint4 sourceRect;
+	uint4 destinationRect;
+};
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
+	if (any(id.xy >= destinationRect.zw)) return;
 	uint w, h;
-	dst.GetDimensions(w, h);
-	if (id.x < w && id.y < h)
-		dst[id.xy] = src.SampleLevel(linearClamp, (float2(id.xy) + 0.5) / float2(w, h), 0);
+	src.GetDimensions(w, h);
+	float2 origin = float2(sourceRect.xy);
+	float2 size = float2(sourceRect.zw);
+	float2 samplePosition = origin + (float2(id.xy) + 0.5) * size / float2(destinationRect.zw);
+	samplePosition = clamp(samplePosition, origin + 0.5, origin + size - 0.5);
+	dst[destinationRect.xy + id.xy] = src.SampleLevel(linearClamp, samplePosition / float2(w, h), 0);
 }
 )";
 
@@ -736,15 +750,17 @@ void main(uint3 id : SV_DispatchThreadID)
 			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0},
 			{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1}
 		};
-		D3D12_ROOT_PARAMETER param{};
-		param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-		param.DescriptorTable = {_countof(ranges), ranges};
+		D3D12_ROOT_PARAMETER params[2]{};
+		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[0].DescriptorTable = {_countof(ranges), ranges};
+		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		params[1].Constants.Num32BitValues = 8;
 		D3D12_STATIC_SAMPLER_DESC sampler{};
 		sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
 		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 		sampler.MaxAnisotropy = 1;
 		sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-		const D3D12_ROOT_SIGNATURE_DESC desc{1, &param, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+		const D3D12_ROOT_SIGNATURE_DESC desc{_countof(params), params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
 		ComPtr<ID3DBlob> signature;
 		if (!Check(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, nullptr), "FG scale root signature serialize")) return false;
 		if (!Check(g.d12->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&g.scaleRs)), "FG scale root signature")) return false;
@@ -758,7 +774,8 @@ void main(uint3 id : SV_DispatchThreadID)
 		return true;
 	}
 
-	void ScaleFrame(ID3D12GraphicsCommandList* list, const Shared& src, const Shared& dst, UINT descriptor)
+	void ScaleFrame(ID3D12GraphicsCommandList* list, const Shared& src, const Shared& dst,
+		ImageRect sourceRect, ImageRect destinationRect, UINT descriptor)
 	{
 		D3D12_RESOURCE_BARRIER barriers[2];
 		Barrier(src.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, barriers[0]);
@@ -777,7 +794,10 @@ void main(uint3 id : SV_DispatchThreadID)
 		list->SetComputeRootSignature(g.scaleRs.Get());
 		list->SetPipelineState(g.scalePso.Get());
 		list->SetComputeRootDescriptorTable(0, gpu);
-		list->Dispatch((dst.w + 7) / 8, (dst.h + 7) / 8, 1);
+		const UINT rectangles[]{sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height,
+			destinationRect.x, destinationRect.y, destinationRect.width, destinationRect.height};
+		list->SetComputeRoot32BitConstants(1, _countof(rectangles), rectangles, 0);
+		list->Dispatch((destinationRect.width + 7) / 8, (destinationRect.height + 7) / 8, 1);
 
 		for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 		list->ResourceBarrier(_countof(barriers), barriers);
@@ -901,15 +921,25 @@ void main(uint3 id : SV_DispatchThreadID)
 		return ratio >= 0.99 && ratio <= 1.01;
 	}
 
+	ImageRect FitScene(UINT w, UINT h, UINT sceneW, UINT sceneH)
+	{
+		if (MatchingAspectRatio(w, h, sceneW, sceneH)) return {0, 0, w, h};
+		// shortcut: uses the game's centered aspect-fit placement, read the compositing viewport if a scene uses an offset.
+		const double scale = min(double(w) / sceneW, double(h) / sceneH);
+		const UINT width = min(w, max(1u, static_cast<UINT>(scale * sceneW + 0.5)));
+		const UINT height = min(h, max(1u, static_cast<UINT>(scale * sceneH + 0.5)));
+		return {(w - width) / 2, (h - height) / 2, width, height};
+	}
+
 	bool EnsureFg(const FrameData& fd, uint32_t keyW, uint32_t keyH)
 	{
 		g.fgSceneW = fd.displayW;
 		g.fgSceneH = fd.displayH;
 		UINT displayW = fd.displayW, displayH = fd.displayH;
 		// A smaller swap chain does not need interpolation at the full upscaled scene resolution.
-		if (MatchingAspectRatio(g.fgBackbufferW, g.fgBackbufferH, displayW, displayH)) {
-			displayW = min(displayW, max(g.fgBackbufferW, keyW));
-			displayH = min(displayH, max(g.fgBackbufferH, keyH));
+		if (MatchingAspectRatio(g.fgContent.width, g.fgContent.height, displayW, displayH)) {
+			displayW = min(displayW, max(g.fgContent.width, keyW));
+			displayH = min(displayH, max(g.fgContent.height, keyH));
 		}
 		uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
 		if (g.fg && g.fgDisplayW == displayW && g.fgDisplayH == displayH && g.fgRenderW == keyW && g.fgRenderH == keyH && g.fgFlags == flags) return true;
@@ -1255,9 +1285,8 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	ComPtr<ID3D11Texture2D> bb;
 	D3D11_TEXTURE2D_DESC bd{};
 	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) bb->GetDesc(&bd);
-	const bool scaled = bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
-	// shortcut: scene and window must have the same aspect ratio, add viewport mapping for letterboxed scenes.
-	if (!MatchingAspectRatio(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH) ||
+	if (!bd.Width || !bd.Height || !g.fgSceneW || !g.fgSceneH ||
+		(bd.Width >= bd.Height) != (g.fgSceneW >= g.fgSceneH) ||
 		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM)
 	{
 		static bool warned = false;
@@ -1268,10 +1297,25 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		}
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
+		g.fgContent = {};
 		return false;
 	}
-	g.fgBackbufferW = bd.Width;
-	g.fgBackbufferH = bd.Height;
+	const ImageRect content = FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
+	const ImageRect previous = g.fgContent;
+	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
+	const bool scaled = letterboxed || bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
+	g.fgContent = content;
+	if (previous.x != content.x || previous.y != content.y ||
+		previous.width != content.width || previous.height != content.height)
+	{
+		if (letterboxed)
+			Log("FG centered viewport: %u,%u %ux%u in %ux%u.", content.x, content.y, content.width, content.height, bd.Width, bd.Height);
+		if (previous.width) {
+			g.fgHavePrevious = false;
+			g.stats.fgSkipped++;
+			return false;
+		}
+	}
 	if (GetCurrentThreadId() != g.renderThread && !g.fgCrossThread)
 	{
 		ComPtr<ID3D11Multithread> multithread;
@@ -1328,11 +1372,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!Check(g.alloc[slot]->Reset(), "FG command allocator Reset") || !Check(l->Reset(g.alloc[slot].Get(), nullptr), "FG command list Reset")) { Fail("FG command list (above)."); return false; }
 
 	g.ctx->CopyResource(g.present.t11.Get(), bb.Get());
+	if (letterboxed && showGenerated)
+		g.ctx->CopyResource(g.gen.t11.Get(), bb.Get());
 	uint64_t ready = ++g.inValue;
 	if (!Check(g.ctx->Signal(g.in11.Get(), ready), "D3D11 Signal (FG)")) { l->Close(); Fail("fence (above)."); return false; }
 	g.ctx->Flush();
 
-	if (scaled) ScaleFrame(l, g.present, g.fgColor, slot * 4);
+	const ImageRect interpolation{0, 0, g.fgDisplayW, g.fgDisplayH};
+	if (scaled) ScaleFrame(l, g.present, g.fgColor, content, interpolation, slot * 4);
 	D3D12_RESOURCE_BARRIER barriers[2];
 	Barrier(source.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, barriers[0]);
 	Barrier(output.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, barriers[1]);
@@ -1356,7 +1403,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 	l->ResourceBarrier(_countof(barriers), barriers);
 	if (scaled && rc == FFX_API_RETURN_OK && showGenerated && d.numGeneratedFrames)
-		ScaleFrame(l, g.fgOutput, g.gen, slot * 4 + 2);
+		ScaleFrame(l, g.fgOutput, g.gen, interpolation, content, slot * 4 + 2);
 	l->ResolveQueryData(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, g.readback.Get(), slot * 2 * sizeof(uint64_t));
 	if (!Check(l->Close(), "FG command list Close")) { Fail("FG command list (above)."); return false; }
 	if (!Check(g.queue->Wait(g.in12.Get(), ready), "queue Wait (FG)")) { Fail("fence (above)."); return false; }
@@ -1381,10 +1428,13 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!showGenerated || !d.numGeneratedFrames) { g.stats.fgSkipped++; return false; }
 
 	g.ctx->CopyResource(bb.Get(), g.gen.t11.Get());
-	// Unity can hold a real frame for multiple refreshes. Split that same budget over the two Presents.
-	const UINT generatedSync = sync < 2 ? sync : sync / 2;
-	const UINT realSync = sync < 2 ? sync : sync - generatedSync;
-	const HRESULT generated = original(sc, generatedSync, flags, parameters);
+	// A flip-model Present at interval zero can discard the queued interpolation before scanout.
+	const bool syncPair = sync == 0 && (chain.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+		chain.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
+	const UINT pairFlags = syncPair ? flags & ~DXGI_PRESENT_ALLOW_TEARING : flags;
+	const UINT generatedSync = syncPair ? 1 : sync < 2 ? sync : sync / 2;
+	const UINT realSync = sync < 2 ? generatedSync : sync - generatedSync;
+	const HRESULT generated = original(sc, generatedSync, pairFlags, parameters);
 	if (generated != S_OK)
 	{
 		g.ctx->CopyResource(bb.Get(), g.present.t11.Get());
@@ -1393,6 +1443,11 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		return true;
 	}
 	g.stats.fgGenerated++;
+	static bool reportedSync = false;
+	if (syncPair && !reportedSync) {
+		reportedSync = true;
+		Log("FG synchronizes flip-model frame pairs to vblank.");
+	}
 	LARGE_INTEGER t1;
 	QueryPerformanceCounter(&t1);
 	double half = intervalMs * 0.5;
@@ -1404,7 +1459,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb2))) && bb2)
 	{
 		g.ctx->CopyResource(bb2.Get(), g.present.t11.Get());
-		*hr = original(sc, realSync, flags, parameters);
+		*hr = original(sc, realSync, pairFlags, parameters);
 		g.stats.fgReal++;
 	}
 	else *hr = DXGI_ERROR_INVALID_CALL;
