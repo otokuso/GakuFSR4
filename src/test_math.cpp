@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
@@ -16,6 +17,12 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(PresetRatio(L"NativeAA")==1.0f);
+    assert(PresetRatio(L"quality")==1.5f);
+    assert(PresetRatio(L"Balanced")==1.7f);
+    assert(PresetRatio(L"Performance")==2.0f);
+    assert(PresetRatio(L"UltraPerformance")==3.0f);
+    assert(PresetRatio(L"unknown")==0.0f);
     assert(frame_math::RenderSize(1920,1.5f)==1280);
     assert(frame_math::RenderSize(1080,1.5f)==720);
     assert(frame_math::RenderSize(2160,1.5f)==1440);

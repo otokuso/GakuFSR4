@@ -26,7 +26,9 @@ GakuLoader導入済みのゲームフォルダーへ以下のファイルを配�
 
 AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)から取得してください。GakuLoaderとゲーム本体は別途必要です。
 
-`gakufsr4.ini` の `Ratio=1.5` がQuality、`Ratio=1.0` がNative AAです。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
+`gakufsr4.ini` の `Preset=Quality` を編集してプリセットを選べます。選択肢は `NativeAA`（1.0倍）、`Quality`（1.5倍）、`Balanced`（1.7倍）、`Performance`（2.0倍）、`UltraPerformance`（3.0倍）です。倍率は出力解像度と内部描画解像度の各辺の比です。
+
+`Preset` が未指定なら、旧版の `Ratio` 設定が使われます。プリセット名が認識できない場合はQualityになります。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
 
 対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
 

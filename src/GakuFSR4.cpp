@@ -2,6 +2,7 @@
 #include "../vendor/ghpc/bridge.cpp"
 #include "GakuPlugin.h"
 #include "FrameMath.h"
+#include "Preset.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
 #include <array>
@@ -565,9 +566,18 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
     if(!GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())) { *state=nullptr; return GAKU_OK; }
     wchar_t value[64];
-    GetPrivateProfileStringW(L"FSR4",L"Ratio",L"1.5",value,64,config.c_str());
-    wchar_t* end=nullptr;ratio=wcstof(value,&end);
-    if(!end||end==value||*end||!std::isfinite(ratio)||ratio<1||ratio>3) { Log("Invalid Ratio in configuration",GAKU_LOG_ERROR); return GAKU_E_INVALID_ARGUMENT; }
+    wchar_t* end=nullptr;
+    if(GetPrivateProfileStringW(L"FSR4",L"Preset",L"",value,64,config.c_str())) {
+        ratio=PresetRatio(value);
+        if(ratio==0) {
+            ratio=1.5f;
+            Log("Unrecognized FSR4 Preset; using Quality",GAKU_LOG_WARNING);
+        }
+    } else {
+        GetPrivateProfileStringW(L"FSR4",L"Ratio",L"1.5",value,64,config.c_str());
+        ratio=wcstof(value,&end);
+        if(!end||end==value||*end||!std::isfinite(ratio)||ratio<1||ratio>3) { Log("Invalid Ratio in configuration",GAKU_LOG_ERROR); return GAKU_E_INVALID_ARGUMENT; }
+    }
     GetPrivateProfileStringW(L"FSR4",L"Sharpness",L"0.2",value,64,config.c_str());
     sharpness=wcstof(value,&end);
     if(!end||end==value||*end||!std::isfinite(sharpness)||sharpness<0||sharpness>1) return GAKU_E_INVALID_ARGUMENT;
@@ -601,7 +611,7 @@ extern "C" __declspec(dllexport) GakuStatus GakuPlugin_Query(uint32_t abi,uint32
     if(!out) return GAKU_E_INVALID_ARGUMENT;
     if(abi!=GAKU_ABI_VERSION) return GAKU_E_VERSION;
     if(size<sizeof(GakuPluginDescriptor)) return GAKU_E_SIZE;
-    *out={GAKU_ABI_VERSION,sizeof(GakuPluginDescriptor),"gakufsr4","GakuFSR4","0.1.8",
+    *out={GAKU_ABI_VERSION,sizeof(GakuPluginDescriptor),"gakufsr4","GakuFSR4","0.1.9",
         gakufsr::Activate,nullptr,gakufsr::Tick,nullptr,nullptr,gakufsr::Shutdown};
     return GAKU_OK;
 }
