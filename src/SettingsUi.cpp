@@ -11,6 +11,7 @@ namespace {
 GakuDesktopUiService desktop{};
 std::wstring configPath;
 bool draftEnabled=true;
+bool draftFrameGeneration=false;
 int draftPreset=-1;
 int draftSharpness=20;
 const char* saveMessage=nullptr;
@@ -22,14 +23,16 @@ bool Save() {
         return WritePrivateProfileStringW(L"FSR4",key,value,configPath.c_str())!=FALSE;
     };
     return (draftPreset<0 || write(L"Preset",FsrPresets[draftPreset].key)) &&
-        write(L"Sharpness",sharpness) && write(L"Enabled",draftEnabled?L"1":L"0");
+        write(L"Sharpness",sharpness) && write(L"FrameGeneration",draftFrameGeneration?L"1":L"0") &&
+        write(L"Enabled",draftEnabled?L"1":L"0");
 }
 }
 
-void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,bool enabled,float ratio,float sharpness) {
+void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,bool enabled,float ratio,float sharpness,bool frameGeneration) {
     if(host->queryService(host->hostContext,GAKU_SERVICE_DESKTOP_UI,1,sizeof desktop,&desktop)!=GAKU_OK) return;
     configPath=path;
     draftEnabled=enabled;
+    draftFrameGeneration=frameGeneration;
     draftSharpness=static_cast<int>(std::lround(sharpness*100));
     draftPreset=-1;
     for(int i=0;i<static_cast<int>(std::size(FsrPresets));++i)
@@ -47,6 +50,7 @@ void DrawSettings(void*) {
     auto* previous=ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(binding.imguiContext));
     ImGui::Checkbox("Enable FSR 4",&draftEnabled);
+    ImGui::Checkbox("Frame Generation (2x)",&draftFrameGeneration);
     if(ImGui::BeginCombo("Preset",draftPreset<0?"Custom ratio":FsrPresets[draftPreset].label)) {
         for(int i=0;i<static_cast<int>(std::size(FsrPresets));++i) {
             if(ImGui::Selectable(FsrPresets[i].label,draftPreset==i)) draftPreset=i;

@@ -6,15 +6,15 @@
 - Commit: bc79afa6a57c8970c8b760108d440e4ff30b78e4
 - GPL-3.0; full license in LICENSE.
 - The D3D11/D3D12 bridge and AMD API headers are vendored under vendor/ghpc.
-- Changes to bridge.cpp: require numeric 4.x provider; omit frame-generation DLL loading; keep backend state process-resident to avoid COM destruction under the DLL loader lock.
-- The original present.cpp is retained as upstream source but is not built. src/NoPresent.cpp disables all present hooking.
+- Changes to bridge.cpp: require a numeric 4.x upscaling provider, load the frame-generation DLL on request, validate the D3D11 presentation path, and keep backend state process-resident to avoid COM destruction under the DLL loader lock.
+- Changes to present.cpp: capture Unity's swap chain and route both Present and Present1 through manual frame generation when enabled.
 
 The GakuFSR4 integration source is distributed under GPL-3.0 as well. AMD runtime binaries are separate, unmodified components under AMD's terms, not GPL-licensed binaries.
 
 ## AMD FSR SDK 2.4.0
 
 - https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0
-- Runtime binaries: Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll.
+- Runtime binaries: Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll.
 - AMD's complete license and notices are in runtime/AMD-FSR-LICENSE.md (installed next to these binaries).
 - AMD API headers bundled by GHPC-FSR4 retain their original notices. Refer to the AMD license for individual source-file exceptions.
 

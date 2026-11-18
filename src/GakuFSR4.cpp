@@ -12,6 +12,8 @@
 #include <stdexcept>
 #include <utility>
 
+bool CaptureGameSwapChain(const GakuHookService& hooks);
+
 namespace gakufsr {
 using P = void*;
 using M = const void*;
@@ -20,6 +22,7 @@ GakuRuntimeService runtime{};
 GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
+bool frameGeneration=false;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -139,6 +142,7 @@ struct Methods {
     M width,height,targetDimension,targetSamples,targetDynamic,rtiTexture,rtiId,blit,blitCamera;
     PluginEventFn event=nullptr;
     M nearPlane,farPlane,fov,id,transform,position,frame,time,reversed,device,orthographic,dynamicResolution;
+    M up,right,forward;
     M getBackBuffer;
     P rtClass,rtiClass;
 } method{};
@@ -376,19 +380,27 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     fd.createFlags=FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
     if(At<P>(cd,field.target)&&At<bool>(cd,field.hdr)) fd.createFlags|=FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
     if(api.Value<bool>(method.reversed)) fd.createFlags|=FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
-    struct Vec3 { float x,y,z; };
+    using Vec3=std::array<float,3>;
     P transform=api.Invoke(method.transform,capture.camera.Get());
     auto pos=api.Value<Vec3>(method.position,transform);
-    float xyz[]{pos.x,pos.y,pos.z};
-    fd.reset=frame_math::Reset(capture.id,history.id,capture.frame,history.frame,fov,history.fov,xyz,history.pos)||
+    fd.reset=frame_math::Reset(capture.id,history.id,capture.frame,history.frame,fov,history.fov,pos.data(),history.pos)||
         history.w!=w||history.h!=h;
     auto taa=static_cast<char*>(cd)+field.taaSettings;
     fd.reset|=At<int>(taa,field.reset)>0;
+    if(frameGeneration) {
+        fd.fg=1;
+        std::copy(pos.begin(),pos.end(),fd.camPos);
+        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight},
+                              std::pair{method.forward,fd.camFwd}}) {
+            auto axis=api.Value<Vec3>(getter,transform);
+            std::copy(axis.begin(),axis.end(),dst);
+        }
+    }
     QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
         reinterpret_cast<P>(&RenderEvent),1,packet.get());
     packet.release();submitted.fetch_add(1);
     history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
-    memcpy(history.pos,xyz,sizeof xyz);
+    std::copy(pos.begin(),pos.end(),history.pos);
 }
 
 void Final(P self,P cmd,P rd,M mi) {
@@ -532,7 +544,13 @@ void Bind() {
     method.orthographic=api.Method(camera,"get_orthographic",{});
     method.dynamicResolution=api.Method(camera,"get_allowDynamicResolution",{});
     method.transform=api.Method(api.Class("UnityEngine","Component"),"get_transform",{});
-    method.position=api.Method(api.Class("UnityEngine","Transform"),"get_position",{});
+    auto transform=api.Class("UnityEngine","Transform");
+    method.position=api.Method(transform,"get_position",{});
+    if(frameGeneration) {
+        method.up=api.Method(transform,"get_up",{});
+        method.right=api.Method(transform,"get_right",{});
+        method.forward=api.Method(transform,"get_forward",{});
+    }
     method.frame=api.Method(api.Class("UnityEngine","Time"),"get_frameCount",{});
     method.time=api.Method(api.Class("UnityEngine","Time"),"get_unscaledDeltaTime",{});
     P sys=api.Class("UnityEngine","SystemInfo");
@@ -552,7 +570,8 @@ void Bind() {
         {*static_cast<P const*>(resolveBlit),reinterpret_cast<P>(&ResolveBlit),reinterpret_cast<P*>(&originalResolveBlit)},
     };
     if(hooks.acquireBatch(hooks.context,4,requests)!=GAKU_OK) throw std::runtime_error("Could not acquire URP hook batch");
-    Log("URP hooks installed (native plugin-event binding). FSR 4 required; upscale ratio "+std::to_string(ratio)+". No frame generation.");
+    Log("URP hooks installed. FSR 4 upscale ratio "+std::to_string(ratio)+
+        (frameGeneration?". Frame generation enabled.":". Frame generation disabled."));
     bound=true;
 }
 
@@ -566,6 +585,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     dataPath=std::wstring(runtime.localRoot)+L"\\PluginData\\gakufsr4";
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
+    const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];
     wchar_t* end=nullptr;
     if(GetPrivateProfileStringW(L"FSR4",L"Preset",L"",value,64,config.c_str())) {
@@ -582,9 +602,12 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     GetPrivateProfileStringW(L"FSR4",L"Sharpness",L"0.2",value,64,config.c_str());
     sharpness=wcstof(value,&end);
     if(!end||end==value||*end||!std::isfinite(sharpness)||sharpness<0||sharpness>1) return GAKU_E_INVALID_ARGUMENT;
-    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness);
+    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness,configFg);
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
+    frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
+    if(frameGeneration&&!CaptureGameSwapChain(hooks))
+        Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
 }
 void Tick(P,float) {
@@ -593,9 +616,14 @@ void Tick(P,float) {
         char line[1024];for(int i=0;i<24&&FSR4_PollLog(line,sizeof line)>0;++i) Log(line);
         if(renderFailed.exchange(false)) Stop("FSR backend failed (see bridge log)");
         static bool reported=false;
-        if(completed.load()&&!reported) {
+        static bool fgReported=false;
+        if(completed.load()&&(!reported||(frameGeneration&&!fgReported))) {
             Stats stats{};FSR4_GetStats(&stats);
-            if(stats.frames) { reported=true;Log(std::string("FSR active: ")+stats.provider); }
+            if(stats.frames&&!reported) { reported=true;Log(std::string("FSR active: ")+stats.provider); }
+            if(stats.fgGenerated&&!fgReported) {
+                fgReported=true;
+                Log(std::string("FSR Frame Generation active: ")+stats.fgProvider);
+            }
         }
         if(bound&&enabled&&submitted.load()>completed.load()+32) Stop("Render event is not being consumed");
     } catch(const std::exception& e) { Stop(e.what()); }
@@ -614,7 +642,7 @@ extern "C" __declspec(dllexport) GakuStatus GakuPlugin_Query(uint32_t abi,uint32
     if(!out) return GAKU_E_INVALID_ARGUMENT;
     if(abi!=GAKU_ABI_VERSION) return GAKU_E_VERSION;
     if(size<sizeof(GakuPluginDescriptor)) return GAKU_E_SIZE;
-    *out={GAKU_ABI_VERSION,sizeof(GakuPluginDescriptor),"gakufsr4","GakuFSR4","0.1.10",
+    *out={GAKU_ABI_VERSION,sizeof(GakuPluginDescriptor),"gakufsr4","GakuFSR4","0.2.0",
         gakufsr::Activate,nullptr,gakufsr::Tick,nullptr,gakufsr::DrawSettings,gakufsr::Shutdown};
     return GAKU_OK;
 }

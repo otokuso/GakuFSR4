@@ -2,7 +2,7 @@
 
 学園アイドルマスターのWindows版向けFSR 4 MODです。[GakuLoader](https://github.com/Gaku-Mod-Tools/GakuLoader)のプラグインとして動作します。
 
-既定のQualityモードでは、3Dを出力解像度の各辺約2/3で描き、FSR 4で拡大します。v0.1.8はRadeon RX 9070 XTでゲーム内動作を確認済みです（FSR 4.1.2、1440×2560 → 2160×3840）。フレーム生成は対象外です。
+既定のQualityモードでは、3Dを出力解像度の各辺約2/3で描き、FSR 4.1.2で拡大します。FSR Frame Generation 4.0.2を有効にすると、対応する3Dシーンで実フレームの間に補間フレームを1枚表示します。
 
 ## ビルド
 
@@ -23,6 +23,7 @@ GakuLoader導入済みのゲームフォルダーへ以下のファイルを配�
 | `build/Release/GakuFSR4.dll` | `GakuLoader/plugins/` |
 | `gakufsr4.ini` | `GakuLoader/Configs/` |
 | `amd_fidelityfx_loader_dx12.dll` と `amd_fidelityfx_upscaler_dx12.dll` | `GakuLoader/PluginData/gakufsr4/` |
+| `amd_fidelityfx_framegeneration_dx12.dll`（フレーム生成を使う場合） | `GakuLoader/PluginData/gakufsr4/` |
 
 AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)から取得してください。GakuLoaderとゲーム本体は別途必要です。
 
@@ -32,9 +33,13 @@ AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/F
 
 対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
 
+フレーム生成は既定で無効です。`FrameGeneration=1` で有効になり、ゲームログの `FSR Frame Generation active` に実際に使ったバージョンが出ます。4.0.2にはWindows 11とRadeon RX 9000シリーズ以降が必要です。カメラとSDRのバックバッファの縦横比が一致し、補間フレームを挟める表示間隔があるときに動作します。ウィンドウが小さいときは、カメラの描画解像度を下限に補間の処理解像度を抑えます。画面に合成済みのUIも補間の対象になります。
+
+RX 9070 XTで、ゲーム内の縦画面に対してFSR 4.1.2とFSR Frame Generation 4.0.2の動作を確認しました。
+
 ## GakuLoaderで設定
 
-ゲーム起動後にF1でGakuLoaderを開き、`GakuFSR4` パネルを選びます。FSR 4の有効・無効、プリセット、シャープネス（0〜100%）を変更し、`Save settings` を押してください。同じINIファイルに保存され、ゲームの次回起動時に反映されます。
+ゲーム起動後にF1でGakuLoaderを開き、`GakuFSR4` パネルを選びます。FSR 4の有効・無効、フレーム生成、プリセット、シャープネス（0〜100%）を変更し、`Save settings` を押してください。同じINIファイルに保存され、ゲームの次回起動時に反映されます。
 
 ## ライセンス
 

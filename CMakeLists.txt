@@ -6,7 +6,7 @@ add_library(gaku_imgui STATIC
   vendor/imgui/imgui_tables.cpp vendor/imgui/imgui_widgets.cpp)
 target_include_directories(gaku_imgui PUBLIC vendor/imgui)
 set_property(TARGET gaku_imgui PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
-add_library(GakuFSR4 SHARED src/GakuFSR4.cpp src/NoPresent.cpp src/SettingsUi.cpp)
+add_library(GakuFSR4 SHARED src/GakuFSR4.cpp vendor/ghpc/present.cpp src/SettingsUi.cpp)
 target_compile_features(GakuFSR4 PRIVATE cxx_std_17)
 target_include_directories(GakuFSR4 PRIVATE include
   vendor/ghpc/ffx/Kits/FidelityFX/api/include
@@ -22,7 +22,7 @@ target_compile_options(test_math PRIVATE /UNDEBUG)
 add_test(NAME frame_math COMMAND test_math)
 add_executable(test_gpu src/test_gpu.cpp)
 target_compile_features(test_gpu PRIVATE cxx_std_17)
-target_link_libraries(test_gpu PRIVATE d3d11)
+target_link_libraries(test_gpu PRIVATE d3d11 dxgi)
 add_executable(test_plugin src/test_plugin.cpp)
 target_include_directories(test_plugin PRIVATE include)
 target_link_libraries(test_plugin PRIVATE gaku_imgui)
