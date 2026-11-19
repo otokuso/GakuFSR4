@@ -10,11 +10,14 @@ The GitHub Actions `windows-ci.yml` workflow builds Debug and Release on Windows
 
    ```powershell
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime
+   .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --dynamic
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-scaled
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-letterbox
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-offset
    ```
+
+   The dynamic GPU test logs each frame's render size, history reset, modeled lighting, detected object center, and sample at the object's previous position. It returns a nonzero exit code for large positioning errors, a bright ghost at that position, or a context recreation during the render-size change.
 
 4. In a game installation with GakuLoader, check deployment file paths:
 
