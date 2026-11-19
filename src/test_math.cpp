@@ -9,6 +9,7 @@
 #include "FgDropNotice.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
+#include "PrimaryCamera.h"
 #include <cassert>
 #include <mutex>
 #include <thread>
@@ -125,16 +126,32 @@ int main() {
             assert(!lock.owns_lock());
             dropNotice.Mark(&otherChain);
             assert(!dropNotice.Consume());
+
             dropNotice.Mark(&gameChain);
-            dropNotice.Mark(&gameChain);
+            dropNotice.Mark(&gameChain1);
         });
         present.join();
         assert(dropNotice.Consume());
         assert(!dropNotice.Consume());
     }
+    dropNotice.Mark(&gameChain1);
+    assert(dropNotice.Consume());
     dropNotice.SetTarget(nullptr);
     dropNotice.Mark(&gameChain);
     assert(!dropNotice.Consume());
+    PrimaryCamera camera;
+    assert(camera.Allow(11,10));
+    assert(!camera.Allow(22,10));
+    assert(camera.Allow(11,11));
+    assert(!camera.Allow(22,11));
+    assert(!camera.Allow(22,12)); // retain the first camera across a one-frame gap
+    assert(camera.Allow(22,13)); // first camera disappeared, allow replacement
+    assert(!camera.Allow(11,13));
+    assert(camera.Allow(33,1));
+    assert(!camera.Allow(22,1));
+    assert(camera.Allow(33,2));
+    camera.Reset();
+    assert(camera.Allow(11,14));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
