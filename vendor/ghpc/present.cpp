@@ -18,8 +18,6 @@ using Microsoft::WRL::ComPtr;
 
 void BridgeLog(const char* fmt, ...);
 using PresentCall = HRESULT (*)(IDXGISwapChain*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
-bool FgPresent(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
-	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr);
 
 namespace
 {
@@ -33,7 +31,6 @@ namespace
 	PresentHookSlots g_slots;
 	CreateFn g_create = nullptr;
 	CreateForHwndFn g_createForHwnd = nullptr;
-	std::atomic<bool> g_capture{ false };
 	std::atomic<bool> g_tryNative{ false };
 	PresentHookRetry g_probeRetry;
 	std::atomic<bool> g_hooked{ false };
@@ -116,13 +113,11 @@ namespace
 		LARGE_INTEGER appEntry{};
 		QueryPerformanceCounter(&appEntry);
 		HRESULT hr;
-		bool ours = false;
 		if (!g_inHook)
 		{
 			g_inHook = true;
-			ours = FgPresent(sc, sync, flags, original, parameters, &hr);
 			g_presents++;
-			if (!ours) hr = original(sc, sync, flags, parameters);
+			hr = original(sc, sync, flags, parameters);
 			if (hr == S_OK && !(flags & DXGI_PRESENT_TEST)) {
 				DXGI_SWAP_CHAIN_DESC desc{};
 				if (SUCCEEDED(sc->GetDesc(&desc)) && IsGameFpsWindow(desc.OutputWindow)) {
@@ -200,7 +195,7 @@ namespace
 		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&d11)))) return false;
 		const HRESULT hr = CreateNativeD3D11Proxy(factory, d11.Get(), window, desc, fullscreen, chain);
 		if (FAILED(hr)) {
-			BridgeLog("AMD native SwapChain unavailable (0x%08x, format %u, swap effect %u); keeping manual FG.",
+			BridgeLog("AMD native SwapChain unavailable (0x%08x, format %u, swap effect %u); using the game SwapChain without FG.",
 				static_cast<unsigned>(hr), desc.Format, desc.SwapEffect);
 			return false;
 		}
@@ -292,7 +287,7 @@ namespace
 	}
 }
 
-bool CaptureGameSwapChain(const GakuHookService& hooks, bool nativeSwapchain)
+bool CaptureGameSwapChain(const GakuHookService& hooks, bool enableFrameGeneration)
 {
 	ComPtr<IDXGIFactory2> factory;
 	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -301,9 +296,9 @@ bool CaptureGameSwapChain(const GakuHookService& hooks, bool nativeSwapchain)
 		{vtable[10], reinterpret_cast<void*>(&CreateHook), reinterpret_cast<void**>(&g_create)},
 		{vtable[15], reinterpret_cast<void*>(&CreateForHwndHook), reinterpret_cast<void**>(&g_createForHwnd)}
 	};
-	g_capture = hooks.acquireBatch(hooks.context, _countof(requests), requests) == GAKU_OK;
-	g_tryNative = g_capture && nativeSwapchain;
-	return g_capture;
+	const bool captured = hooks.acquireBatch(hooks.context, _countof(requests), requests) == GAKU_OK;
+	g_tryNative = captured && enableFrameGeneration;
+	return captured;
 }
 
 void InstallPresentHook(ID3D11Resource* anchor)
@@ -313,14 +308,6 @@ void InstallPresentHook(ID3D11Resource* anchor)
 	Hook(anchor);
 }
 
-bool IsPresentWindow(HWND window) {
-	if (HWND known = g_window.load()) return known == window;
-	// The factory hook can fail even when the fallback Present vtable hook works.
-	// Never treat that as permission to interpolate an unrelated swap chain.
-	if (!UnityWindow(window)) return false;
-	g_window = window;
-	return true;
-}
 bool PresentHooked() { return g_hooked; }
 uint64_t PresentsSeen() { return g_presents.load(); }
 

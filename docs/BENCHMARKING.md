@@ -6,7 +6,7 @@ Open F1 → `GakuFSR4` → **Live frame pacing / input timing**. The panel updat
 
 | UI field | What is actually measured |
 | --- | --- |
-| `Game Present gap` median/p95/p99 | The time between **successful real-game Present call entries** (manual and native FG paths). It excludes generated-frame display events. |
+| `Game Present gap` median/p95/p99 | The time between **successful real-game Present call entries** (FG off or with the AMD Native SwapChain). It excludes generated-frame display events. |
 | `Pacing jitter (stddev)` | Standard deviation of those real-game Present intervals. This is CPU submission-side jitter, not displayed-frame jitter. |
 | `Input event -> Present start` median/p95 | Elapsed CPU time from the **latest keyboard/mouse message removed from the Unity window's message queue** to the **next successful real-game Present call entry**, matched at most once per input event. This is only a *partial* input latency. |
 | `n` | Number of observations in the corresponding rolling window. No observations are shown as `--`, never as zero latency. |
@@ -59,11 +59,11 @@ Find the game's executable name in Task Manager → Details, then record a stabl
 .\PresentMon-2.x-x64.exe --process_name GAME.exe --track_frame_type --timed 45 --terminate_after_timed --output_file native-fg.csv
 ```
 
-Do **not** pass `--no_track_input` or `--no_track_display`. Interact with the game using keyboard or mouse during the capture; clicking repeatedly in a controlled sequence allows `MsClickToPhotonLatency` to have useful samples. For a fair test, use identical input actions and live scenes in baseline (FG OFF), manual FG (`NativeSwapChain=0`) and AMD SwapChain FG (`NativeSwapChain=1`), repeat each three times, and keep VSync/VRR, driver, resolution and refresh rate constant.
+Do **not** pass `--no_track_input` or `--no_track_display`. Interact with the game using keyboard or mouse during the capture; clicking repeatedly in a controlled sequence allows `MsClickToPhotonLatency` to have useful samples. For a fair test, use identical input actions and live scenes in baseline (`FrameGeneration=0`) and AMD SwapChain FG (`FrameGeneration=1`), repeat each three times, and keep VSync/VRR, driver, resolution and refresh rate constant.
 
 ```powershell
 # Combined comparison: frame pacing, application-frame input latency and sample counts
-python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv manual-fg.csv native-fg.csv
+python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv native-fg.csv
 
 # Single-capture per-frame trace for plotting in Excel or another CSV viewer
 python scripts\analyze_presentmon.py --warmup 120 --trace-out native-trace.csv native-fg.csv

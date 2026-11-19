@@ -26,6 +26,6 @@ This is intentionally *not* a direct translation of URP's Lens Distortion compon
 
 - Determine whether the game's URP camera actually uses post-process distortion in the problem scenes. If not, leave both coefficients at zero.
 - If distortion is dynamic or non-radial, replace the static approximation with the *actual per-frame 2D UV delta map*, maintaining the same FFX resource-registration path.
-- On Windows/AMD, compare FG on/off with a known post-process distortion scene and inspect the field orientation/sign, GPU errors, resource lifetime after resize, and input/output frame parity. The math test checks the radial coordinate calculation. Run the standalone GPU harness as described in GPU_TESTING.md with --fg-distortion to check upload and FG dispatch with a synthetic field.
+- On Windows/AMD, compare FG on/off with a known post-process distortion scene and inspect the field orientation/sign, GPU errors, resource lifetime after resize, and input/output frame parity. The math test checks the radial coordinate calculation. Enable native FG in the game and check the bridge log for the field upload and any rejection from the FG provider.
 
 Reference: https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-api/#distortion-field

@@ -33,6 +33,7 @@ struct Stats
     char fgProvider[64];
     uint64_t fgProviderId, fgPrepared, fgGenerated, fgReal, fgSkipped, fgMemory;
     int32_t fgLastResult;
+    // Manual FG counters remain in the exported layout for ABI compatibility.
     float fgGpuMs, fgPaceMs, fgIntervalMs;
     float fgHookMs;
     float fgRefreshHz;

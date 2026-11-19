@@ -14,7 +14,7 @@ target_include_directories(GakuFSR4 PRIVATE include
   vendor/ghpc/ffx/Kits/FidelityFX/framegeneration/include)
 target_compile_definitions(GakuFSR4 PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE PUBLIC=1)
 target_compile_options(GakuFSR4 PRIVATE /W4 /EHa /utf-8)
-target_link_libraries(GakuFSR4 PRIVATE d3d11 d3d12 dxgi winmm gaku_imgui)
+target_link_libraries(GakuFSR4 PRIVATE d3d11 d3d12 dxgi gaku_imgui)
 set_property(TARGET GakuFSR4 PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 add_executable(test_math src/test_math.cpp)
 target_compile_features(test_math PRIVATE cxx_std_17)

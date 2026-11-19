@@ -71,8 +71,7 @@ void DrawSettings(void*) {
         ImGui::Text("Game FPS: %.1f  |  Present FPS (incl. FG): %.1f",fps.realFps,fps.totalFps);
     else
         ImGui::TextUnformatted("Game FPS: --  |  Present FPS (incl. FG): --");
-    // Rolling window of real application Presents, including both manual and
-    // native FG paths. Generated frames never enter these samples.
+    // Rolling window of real application Presents, including when FG is active.
     const ULONGLONG timingNow=GetTickCount64();
     if(!lastTimingRead || timingNow-lastTimingRead>=2000) {
         currentTiming=ReadLiveTiming();
@@ -155,12 +154,10 @@ void DrawSettings(void*) {
                 ImGui::Text("FG GPU: --, VRAM: %.1f MiB",s.fgMemory/1048576.0);
             ImGui::Text("FG prepared: %llu, generated: %llu, real Presents: %llu",
                 (unsigned long long)s.fgPrepared,(unsigned long long)s.fgGenerated,(unsigned long long)s.fgReal);
-            ImGui::Text("FG skipped: %llu, interval too short: %llu",
-                (unsigned long long)s.fgSkipped,(unsigned long long)s.fgNotNeeded);
+            ImGui::Text("FG skipped: %llu",(unsigned long long)s.fgSkipped);
             if(s.fgIntervalMs>0) ImGui::Text("FG source interval: %.2f ms",s.fgIntervalMs);
             else ImGui::TextUnformatted("FG source interval: --");
             if(FSR4_UsesNativeSwapchain()) ImGui::TextUnformatted("FG pacing: AMD SwapChain");
-            else if(s.fgPaceMs>0) ImGui::Text("FG manual pacing wait: %.2f ms",s.fgPaceMs);
             ImGui::Text("FG last dispatch result: %d",s.fgLastResult);
         }
         if(lastFgSkip) ImGui::TextWrapped("Last FG skip: %s",lastFgSkip);

@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <deque>
 #include <map>
-#include <set>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -30,22 +29,18 @@
 #include "../../src/FgRetry.h"
 #include "../../src/FgViewportMath.h"
 #include "../../src/ExposurePolicy.h"
-#include "../../src/FgDropNotice.h"
 #include "../../src/FgCameraValidation.h"
 #include "../../src/NativeSwapchain.h"
 #include "../../src/PresentRate.h"
 #include "../../src/LiveTiming.h"
-#include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
 
 #define EXPORT extern "C" __declspec(dllexport)
 
 void InstallPresentHook(ID3D11Resource* anchor);
-bool IsPresentWindow(HWND window);
 bool PresentHooked();
 uint64_t PresentsSeen();
-using PresentCall = HRESULT (*)(IDXGISwapChain*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 
 struct FrameData
 {
@@ -115,8 +110,6 @@ namespace
 
 	std::mutex g_ffxMsgLock;
 	std::map<std::string, uint64_t> g_ffxMsgCount;
-	std::mutex g_timerLock;
-	bool g_timerRequested = false;
 
 	void OnFfxMessage(uint32_t type, const wchar_t* message)
 	{
@@ -187,7 +180,6 @@ namespace
 		ComPtr<ID3D12GraphicsCommandList> list[Slots];
 		uint64_t allocFence[Slots] = {};
 		bool slotTimed[Slots] = {};
-		bool slotFg[Slots] = {};
 		ComPtr<ID3D11Fence> in11;
 		ComPtr<ID3D12Fence> in12;
 		ComPtr<ID3D12Fence> out12;
@@ -219,33 +211,20 @@ namespace
 
 		ffxContext fg = nullptr;
 		uint32_t fgDisplayW = 0, fgDisplayH = 0, fgRenderW = 0, fgRenderH = 0, fgFlags = 0;
-		bool fgScRgb = false;
-		float fgMinNits = 0.0f, fgMaxNits = 1000.0f;
 		bool fgProvidersListed = false;
 		bool fgUnavailable = false;
 		FgRetry fgRetry;
 		ImageRect fgContent{};
 		bool fgViewportOverrideEnabled = false;
 		ImageRect fgViewportOverride{};
-		UINT fgSceneW = 0, fgSceneH = 0;
-		Shared present, gen, fgColor, fgOutput;
-		ComPtr<ID3D12RootSignature> scaleRs;
-		ComPtr<ID3D12PipelineState> scalePso;
-		ComPtr<ID3D12DescriptorHeap> scaleHeap;
-		UINT scaleInc = 0;
-		DWORD renderThread = 0;
-		bool fgCrossThread = false;
+		Shared present;
 		uint64_t fgFrameId = 0;
 		bool fgPending = false;
-		bool fgPendingReset = false;
 		bool fgHavePrevious = false;
 		FgErrorBurst fgErrors;
 		LONGLONG fgLastEntry = 0;
-		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
 		bool fgOffLogged = true;
-		uint32_t fgPaceSamples = 0;
-		double fgPaceBusyMs = 0, fgPaceBusyMaxMs = 0, fgPaceLateMs = 0, fgPaceLateMaxMs = 0;
 	};
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
@@ -267,17 +246,7 @@ namespace
 		bool enabled = false;
 	};
 	NativePresentState& nativePresent = *new NativePresentState;
-	FgDropNotice g_fgDropNotice;
 	std::atomic<const char*> g_fgSkipReason{nullptr};
-
-	void InvalidateSkippedFgPresent()
-	{
-		if (!g_fgDropNotice.Consume()) return;
-		g_fgSkipReason = "Render lock contention";
-		g.fgPending = g.fgHavePrevious = false;
-		g.fgPendingReset = true;
-		g.stats.fgSkipped++;
-	}
 
 	void FgFailure(int stage, const char* name, ffxReturnCode_t code, uint64_t frameId)
 	{
@@ -330,18 +299,6 @@ namespace
 		case DXGI_FORMAT_R32G32_TYPELESS: return DXGI_FORMAT_R32G32_FLOAT;
 		case DXGI_FORMAT_R16_TYPELESS: return DXGI_FORMAT_R16_FLOAT;
 		default: return f;
-		}
-	}
-
-	const char* FgBackbufferFormatName(DXGI_FORMAT f)
-	{
-		switch (Typed(f))
-		{
-		case DXGI_FORMAT_R8G8B8A8_UNORM: return "RGBA8";
-		case DXGI_FORMAT_B8G8R8A8_UNORM: return "BGRA8 (requires a format-conversion path)";
-		case DXGI_FORMAT_R10G10B10A2_UNORM: return "RGB10A2 (potential HDR10/PQ)";
-		case DXGI_FORMAT_R16G16B16A16_FLOAT: return "RGBA16F (potential scRGB HDR)";
-		default: return "unsupported/unknown";
 		}
 	}
 
@@ -408,9 +365,6 @@ namespace
 		g.motion.Release();
 		g.output.Release();
 		g.present.Release();
-		g.gen.Release();
-		g.fgColor.Release();
-		g.fgOutput.Release();
 	}
 
 	void DestroyFg()
@@ -427,7 +381,7 @@ namespace
 				wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
 				g.fx.Dispatch(&nativePresent.swapchainContext, &wait.header);
 				nativePresent.enabled = false;
-			} else c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+			}
 			c.frameID = g.fgFrameId;
 			g.fx.Configure(&g.fg, &c.header);
 			g.fx.DestroyContext(&g.fg, nullptr);
@@ -442,10 +396,8 @@ namespace
 		g.distortionAttempted = g.distortionDisabled = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
-		g.stats.fgIntervalMs = g.stats.fgPaceMs = g.stats.fgGpuMs = 0;
+		g.stats.fgIntervalMs = g.stats.fgGpuMs = 0;
 		nativePresent.timingValid = false;
-		g.fgPaceSamples = 0;
-		g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		g.stats.fgProviderId = 0;
 		g.stats.fgProvider[0] = 0;
 		g.stats.fgMemory = 0;
@@ -474,7 +426,6 @@ namespace
 			g.readback.Reset();
 			g.expTex.Reset();
 			g.expUpload.Reset();
-			g.scalePso.Reset(); g.scaleRs.Reset(); g.scaleHeap.Reset();
 			g.in12.Reset();
 			g.out12.Reset();
 			g.queue.Reset();
@@ -492,29 +443,25 @@ namespace
 			g.stats.fsrMemory = 0;
 			g.stats.fgProviderId = 0;
 			g.stats.fgProvider[0] = 0;
-			for (Shared* s : { &g.color, &g.depth, &g.motion, &g.output, &g.present, &g.gen, &g.fgColor, &g.fgOutput }) { s->t12.Detach(); s->Release(); }
+			for (Shared* s : { &g.color, &g.depth, &g.motion, &g.output, &g.present }) { s->t12.Detach(); s->Release(); }
 			for (int i = 0; i < Slots; i++) { g.list[i].Detach(); g.alloc[i].Detach(); }
 			g.timestamps.Detach();
 			g.readback.Detach();
 			g.expTex.Detach();
 			g.expUpload.Detach();
 			g.distortionTex.Detach(); g.distortionUpload.Detach();
-			g.scalePso.Detach(); g.scaleRs.Detach(); g.scaleHeap.Detach();
 			g.in12.Detach();
 			g.out12.Detach();
 			g.queue.Detach();
 			g.d12.Detach();
 		}
-		for (int i = 0; i < Slots; i++) { g.allocFence[i] = 0; g.slotTimed[i] = false; g.slotFg[i] = false; }
+		for (int i = 0; i < Slots; i++) { g.allocFence[i] = 0; g.slotTimed[i] = false; }
 		g.in11.Reset();
 		g.out11.Reset();
 		g.ctx.Reset();
 		g.d11.Reset();
 		g.d11Base = nullptr;
-		g_fgDropNotice.SetTarget(nullptr);
-		g.fgCrossThread = false;
 		g.fgContent = {};
-		g.fgScRgb = false;
 		g.inValue = g.outValue = 0;
 		g.expValue = 0;
 		g.providersListed = false;
@@ -786,99 +733,6 @@ namespace
 		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	}
 
-	typedef HRESULT(WINAPI* D3DCompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
-	static const char kScaleHlsl[] = R"(
-Texture2D<float4> src : register(t0);
-SamplerState linearClamp : register(s0);
-RWTexture2D<float4> dst : register(u0);
-cbuffer Rectangles : register(b0)
-{
-	uint4 sourceRect;
-	uint4 destinationRect;
-};
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-	if (any(id.xy >= destinationRect.zw)) return;
-	uint w, h;
-	src.GetDimensions(w, h);
-	float2 origin = float2(sourceRect.xy);
-	float2 size = float2(sourceRect.zw);
-	float2 samplePosition = origin + (float2(id.xy) + 0.5) * size / float2(destinationRect.zw);
-	samplePosition = clamp(samplePosition, origin + 0.5, origin + size - 0.5);
-	dst[destinationRect.xy + id.xy] = src.SampleLevel(linearClamp, samplePosition / float2(w, h), 0);
-}
-)";
-
-	bool EnsureScale()
-	{
-		if (g.scaleHeap) return true;
-		static HMODULE compiler = LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-		auto compile = compiler ? reinterpret_cast<D3DCompileFn>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
-		if (!compile) { Log("FG scaling: d3dcompiler_47.dll unavailable."); return false; }
-		ComPtr<ID3DBlob> shader, errors;
-		HRESULT hr = compile(kScaleHlsl, sizeof kScaleHlsl - 1, "FG scale", nullptr, nullptr, "main", "cs_5_0", 0, 0, &shader, &errors);
-		if (FAILED(hr)) {
-			Log("FG scaling: shader compile failed: 0x%08X %s.", (unsigned)hr, errors ? (const char*)errors->GetBufferPointer() : "");
-			return false;
-		}
-		const D3D12_DESCRIPTOR_RANGE ranges[]{
-			{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0},
-			{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1}
-		};
-		D3D12_ROOT_PARAMETER params[2]{};
-		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-		params[0].DescriptorTable = {_countof(ranges), ranges};
-		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-		params[1].Constants.Num32BitValues = 8;
-		D3D12_STATIC_SAMPLER_DESC sampler{};
-		sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
-		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-		sampler.MaxAnisotropy = 1;
-		sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-		const D3D12_ROOT_SIGNATURE_DESC desc{_countof(params), params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
-		ComPtr<ID3DBlob> signature;
-		if (!Check(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, nullptr), "FG scale root signature serialize")) return false;
-		if (!Check(g.d12->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&g.scaleRs)), "FG scale root signature")) return false;
-		D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
-		pipeline.pRootSignature = g.scaleRs.Get();
-		pipeline.CS = {shader->GetBufferPointer(), shader->GetBufferSize()};
-		if (!Check(g.d12->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&g.scalePso)), "FG scale pipeline")) return false;
-		D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4 * Slots, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
-		if (!Check(g.d12->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g.scaleHeap)), "FG scale descriptor heap")) return false;
-		g.scaleInc = g.d12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		return true;
-	}
-
-	void ScaleFrame(ID3D12GraphicsCommandList* list, const Shared& src, const Shared& dst,
-		ImageRect sourceRect, ImageRect destinationRect, UINT descriptor)
-	{
-		D3D12_RESOURCE_BARRIER barriers[2];
-		Barrier(src.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, barriers[0]);
-		Barrier(dst.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, barriers[1]);
-		list->ResourceBarrier(_countof(barriers), barriers);
-
-		auto cpu = g.scaleHeap->GetCPUDescriptorHandleForHeapStart();
-		auto gpu = g.scaleHeap->GetGPUDescriptorHandleForHeapStart();
-		cpu.ptr += SIZE_T(descriptor) * g.scaleInc;
-		gpu.ptr += UINT64(descriptor) * g.scaleInc;
-		g.d12->CreateShaderResourceView(src.t12.Get(), nullptr, cpu);
-		cpu.ptr += g.scaleInc;
-		g.d12->CreateUnorderedAccessView(dst.t12.Get(), nullptr, nullptr, cpu);
-		ID3D12DescriptorHeap* heaps[]{g.scaleHeap.Get()};
-		list->SetDescriptorHeaps(_countof(heaps), heaps);
-		list->SetComputeRootSignature(g.scaleRs.Get());
-		list->SetPipelineState(g.scalePso.Get());
-		list->SetComputeRootDescriptorTable(0, gpu);
-		const UINT rectangles[]{sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height,
-			destinationRect.x, destinationRect.y, destinationRect.width, destinationRect.height};
-		list->SetComputeRoot32BitConstants(1, _countof(rectangles), rectangles, 0);
-		list->Dispatch((destinationRect.width + 7) / 8, (destinationRect.height + 7) / 8, 1);
-
-		for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-		list->ResourceBarrier(_countof(barriers), barriers);
-	}
-
 	void Fail(const char* why)
 	{
 		Log("FSR stopped: %s", why);
@@ -906,10 +760,8 @@ void main(uint3 id : SV_DispatchThreadID)
 	{
 		if (!g.slotTimed[slot]) return;
 		g.slotTimed[slot] = false;
-		const bool wasFg = g.slotFg[slot];
-		g.slotFg[slot] = false; // Also clear classification when readback Map fails.
 		const auto elapsed = ReadGpuTime(slot);
-		if (elapsed > 0) Average(wasFg ? g.stats.fgGpuMs : g.stats.gpuMs, elapsed);
+		if (elapsed > 0) Average(g.stats.gpuMs, elapsed);
 	}
 
 	void ObserveFgInterval(LONGLONG entry, LONGLONG frequency)
@@ -1011,11 +863,6 @@ void main(uint3 id : SV_DispatchThreadID)
 		Log("FG providers on this GPU (%llu): %s.", (unsigned long long)count, list.c_str());
 	}
 
-	bool MatchingAspectRatio(UINT w, UINT h, UINT sceneW, UINT sceneH)
-	{
-		return FgMatchingAspectRatio(w, h, sceneW, sceneH);
-	}
-
 	// Optional, user-calibrated radial UV offset field for the FG optical-flow
 	// input. Its texture is created only if coefficients are nonzero; the game
 	// must still supply the *actual* post-effect transform for full accuracy.
@@ -1081,33 +928,17 @@ void main(uint3 id : SV_DispatchThreadID)
 		return true;
 	}
 
-	ImageRect FitScene(UINT w, UINT h, UINT sceneW, UINT sceneH)
-	{
-		// shortcut: uses the game's centered aspect-fit placement, read the compositing viewport if a scene uses an offset.
-		return FgAspectFit(w, h, sceneW, sceneH);
-	}
-
 	bool EnsureFg(const FrameData& fd, uint32_t keyW, uint32_t keyH)
 	{
-		g.fgSceneW = fd.displayW;
-		g.fgSceneH = fd.displayH;
-		UINT displayW = fd.displayW, displayH = fd.displayH;
-		// A smaller swap chain does not need interpolation at the full upscaled scene resolution.
-		if (MatchingAspectRatio(g.fgContent.width, g.fgContent.height, displayW, displayH)) {
-			displayW = min(displayW, max(g.fgContent.width, keyW));
-			displayH = min(displayH, max(g.fgContent.height, keyH));
+		DXGI_SWAP_CHAIN_DESC1 chain = {};
+		if (FAILED(nativePresent.chain->GetDesc1(&chain))) return false;
+		const UINT displayW = chain.Width, displayH = chain.Height;
+		g.fgContent = g.fgViewportOverrideEnabled ? g.fgViewportOverride : FgAspectFit(displayW, displayH, fd.displayW, fd.displayH);
+		if (!FgViewportWithinBackbuffer(g.fgContent, displayW, displayH, fd.displayW, fd.displayH)) {
+			g_fgSkipReason = "FG viewport is incompatible with the native SwapChain";
+			return false;
 		}
-		if (nativePresent.chain) {
-			DXGI_SWAP_CHAIN_DESC1 desc = {};
-			if (FAILED(nativePresent.chain->GetDesc1(&desc))) return false;
-			displayW = desc.Width;
-			displayH = desc.Height;
-			g.fgContent = g.fgViewportOverrideEnabled ? g.fgViewportOverride : FitScene(displayW, displayH, fd.displayW, fd.displayH);
-			if (!FgViewportWithinBackbuffer(g.fgContent, displayW, displayH, fd.displayW, fd.displayH)) return false;
-		}
-		uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
-		const bool scRgb = !nativePresent.chain && g.fgScRgb;
-		if (scRgb) flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
+		const uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
 		if (g.fg && g.fgDisplayW == displayW && g.fgDisplayH == displayH && g.fgRenderW == keyW && g.fgRenderH == keyH && g.fgFlags == flags) return true;
 		if (!WaitIdle("new FG context")) return false;
 		DestroyFg();
@@ -1123,7 +954,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		desc.flags = flags;
 		desc.displaySize = { displayW, displayH };
 		desc.maxRenderSize = { keyW, keyH };
-		desc.backBufferFormat = scRgb ? FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT : FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+		desc.backBufferFormat = FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
 		desc.header.pNext = &backend.header;
 		backend.header.pNext = &version.header;
 		ffxReturnCode_t rc = g.fx.CreateContext(&g.fg, &desc.header, nullptr);
@@ -1164,10 +995,9 @@ void main(uint3 id : SV_DispatchThreadID)
 		mq.gpuMemoryUsageFrameGeneration = &mem;
 		ffxReturnCode_t mrc = g.fx.Query(&g.fg, &mq.header);
 		g.stats.fgMemory = mrc == FFX_API_RETURN_OK ? mem.totalUsageInBytes : 0;
-		Log("FG context: inputs up to %ux%u, display %ux%u, flags 0x%X: provider '%s' (id 0x%llX); GPU memory %.1f MB%s; %s.",
+		Log("FG context: inputs up to %ux%u, display %ux%u, flags 0x%X: provider '%s' (id 0x%llX); GPU memory %.1f MB%s (AMD SwapChain callback).",
 			keyW, keyH, displayW, displayH, flags, g.stats.fgProvider, (unsigned long long)g.stats.fgProviderId,
-			mem.totalUsageInBytes / 1048576.0, mrc == FFX_API_RETURN_OK ? "" : " (query failed)",
-			nativePresent.chain ? "AMD SwapChain callback" : "manual dispatch, presented through the game's swap chain");
+			mem.totalUsageInBytes / 1048576.0, mrc == FFX_API_RETURN_OK ? "" : " (query failed)");
 		return true;
 	}
 
@@ -1192,19 +1022,19 @@ void main(uint3 id : SV_DispatchThreadID)
 	void FgPrepare(const FrameData& fd, ID3D12GraphicsCommandList* l, uint32_t keyW, uint32_t keyH)
 	{
 		g.fgRetry.ObserveScene(fd.displayW, fd.displayH, keyW, keyH);
-		if (fd.fg && !fg_camera::Valid(fd.cameraNear, fd.cameraFar, fd.fovV,
+		if (!fd.fg || !g.fgDll || !nativePresent.chain || g.fgUnavailable)
+		{
+			if (fd.fg && g.fgDll && !nativePresent.chain) g_fgSkipReason = "AMD native SwapChain is unavailable";
+			if (g.fg && WaitIdle("FG off")) DestroyFg();
+			g.fgPending = false;
+			if (!g.fgOffLogged) { g.fgOffLogged = true; Log("FG off."); }
+			return;
+		}
+		if (!fg_camera::Valid(fd.cameraNear, fd.cameraFar, fd.fovV,
 			fd.camPos, fd.camUp, fd.camRight, fd.camFwd)) {
 			g_fgSkipReason = "Invalid camera parameters for FG";
 			g.fgPending = g.fgHavePrevious = false;
 			g.stats.fgSkipped++;
-			return;
-		}
-		if (!fd.fg || !g.fgDll || (!PresentHooked() && !nativePresent.chain) || g.fgUnavailable)
-		{
-			if (fd.fg && !PresentHooked()) g_fgSkipReason = "Waiting for a swap chain hook";
-			if (g.fg && WaitIdle("FG off")) DestroyFg();
-			g.fgPending = false;
-			if (!g.fgOffLogged) { g.fgOffLogged = true; Log("FG off."); }
 			return;
 		}
 		if (!g.fgRetry.Ready(GetTickCount64())) {
@@ -1218,18 +1048,12 @@ void main(uint3 id : SV_DispatchThreadID)
 		uint64_t id = ++g.fgFrameId;
 		ffxConfigureDescFrameGeneration c = {};
 		c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
-		c.swapChain = nullptr;
+		c.swapChain = nativePresent.chain;
 		c.frameGenerationEnabled = true;
-		c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
-		c.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
-		if (nativePresent.chain) {
-			c.swapChain = nativePresent.chain;
-			c.flags = 0;
-			c.frameGenerationCallback = NativeInterpolate;
-			c.allowAsyncWorkloads = false; // The timestamp fence is on the game graphics queue.
-			const auto rect = g.fgContent;
-			c.generationRect = { (int32_t)rect.x, (int32_t)rect.y, (int32_t)rect.width, (int32_t)rect.height };
-		}
+		c.frameGenerationCallback = NativeInterpolate;
+		c.allowAsyncWorkloads = false; // The timestamp fence is on the game graphics queue.
+		const auto rect = g.fgContent;
+		c.generationRect = { (int32_t)rect.x, (int32_t)rect.y, (int32_t)rect.width, (int32_t)rect.height };
 		c.frameID = id;
 		ffxConfigureDescFrameGenerationRegisterDistortionFieldResource distortion = {};
 		const bool withDistortion=EnsureFgDistortion(l);
@@ -1254,7 +1078,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			g.stats.fgSkipped++;
 			return;
 		}
-		if (nativePresent.chain) nativePresent.enabled = true;
+		nativePresent.enabled = true;
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 		p.frameID = id;
@@ -1285,41 +1109,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		}
 		g.stats.fgPrepared++;
 		g.fgPending = true;
-		g.fgPendingReset = p.reset;
 		if (g.fgOffLogged) { g.fgOffLogged = false; Log("FG prepared inputs for the game swap chain."); }
-	}
-
-	void Pace(LONGLONG from, double ms)
-	{
-		LARGE_INTEGER f, now;
-		QueryPerformanceFrequency(&f);
-		LONGLONG until = from + (LONGLONG)(ms * f.QuadPart / 1000.0);
-		LONGLONG busyStart = 0;
-		for (;;)
-		{
-			QueryPerformanceCounter(&now);
-			LONGLONG left = until - now.QuadPart;
-			if (left <= 0) break;
-			if (left * 1000.0 / f.QuadPart > 1.5) Sleep(1);
-			else {
-				if (!busyStart) busyStart = now.QuadPart;
-				YieldProcessor();
-			}
-		}
-		// Sample existing behavior before changing the wait strategy; no extra sleeps or yields.
-		const double msPerTick = 1000.0 / f.QuadPart;
-		const double busyMs = busyStart ? (now.QuadPart - busyStart) * msPerTick : 0.0;
-		const double lateMs = (now.QuadPart - until) * msPerTick;
-		g.fgPaceBusyMs += busyMs;
-		g.fgPaceLateMs += lateMs;
-		g.fgPaceBusyMaxMs = max(g.fgPaceBusyMaxMs, busyMs);
-		g.fgPaceLateMaxMs = max(g.fgPaceLateMaxMs, lateMs);
-		if (++g.fgPaceSamples == 600) {
-			Log("FG manual Pace over 600 waits: avg busy-spin %.3f ms, max %.3f ms; avg deadline overshoot %.3f ms, max %.3f ms. Compare with CPU usage and PresentMon.",
-				g.fgPaceBusyMs / 600, g.fgPaceBusyMaxMs, g.fgPaceLateMs / 600, g.fgPaceLateMaxMs);
-			g.fgPaceSamples = 0;
-			g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
-		}
 	}
 
 	void Upscale(const FrameData& handed)
@@ -1349,7 +1139,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			|| !EnsureShared(g.motion, (ID3D11Texture2D*)fd.motion, false, "motion vectors", true)
 			|| !EnsureShared(g.output, (ID3D11Texture2D*)fd.output, true, "output", true)) { Fail("shared textures (above)."); return; }
 		if (!EnsureContext(fd)) { Fail("no FSR context (above)."); return; }
-		if (!nativePresent.chain && ((fd.fg && g.fgDll) || !PresentHooked()))
+		if (!nativePresent.chain && !PresentHooked())
 			InstallPresentHook(static_cast<ID3D11Resource*>(fd.color));
 
 		int slot = (int)(g.submits % Slots);
@@ -1436,7 +1226,6 @@ void main(uint3 id : SV_DispatchThreadID)
 		if (!Check(g.queue->Signal(g.out12.Get(), done), "queue Signal")) { Fail("fence (above)."); return; }
 		g.allocFence[slot] = done;
 		g.slotTimed[slot] = true;
-		g.slotFg[slot] = false;
 		g.submits++;
 
 		if (!Check(g.ctx->Wait(g.out11.Get(), done), "D3D11 Wait")) { Fail("fence (above)."); return; }
@@ -1509,8 +1298,6 @@ void main(uint3 id : SV_DispatchThreadID)
 	void __stdcall OnRenderEvent(int eventId, void* data)
 	{
 		std::lock_guard<std::mutex> lock(g_renderLock);
-		InvalidateSkippedFgPresent();
-		g.renderThread = GetCurrentThreadId();
 		RunRenderEvent(eventId, data);
 	}
 }
@@ -1569,6 +1356,9 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 		state = {};
 		return DXGI_ERROR_UNSUPPORTED;
 	}
+	DXGI_SWAP_CHAIN_DESC1 actual = {};
+	if (SUCCEEDED(state.swapchain->GetDesc1(&actual)))
+		g.fgRetry.ObserveBackbuffer(actual.Width, actual.Height);
 	nativePresent.chain = state.swapchain;
 	nativePresent.swapchainContext = state.context;
 	nativePresent.allocator = std::move(allocator);
@@ -1612,7 +1402,11 @@ HRESULT ResizeNativeSwapchain(NativeSwapchainState& state, UINT count, UINT widt
 	std::lock_guard<std::mutex> lock(g_renderLock);
 	if (!WaitIdle("native swap-chain resize")) return DXGI_ERROR_DEVICE_REMOVED;
 	DestroyFg();
-	return state.swapchain->ResizeBuffers(count, width, height, format, flags);
+	const HRESULT hr = state.swapchain->ResizeBuffers(count, width, height, format, flags);
+	DXGI_SWAP_CHAIN_DESC1 desc = {};
+	if (SUCCEEDED(hr) && SUCCEEDED(state.swapchain->GetDesc1(&desc)))
+		g.fgRetry.ObserveBackbuffer(desc.Width, desc.Height);
+	return hr;
 }
 
 HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* source, UINT sync, UINT flags,
@@ -1719,319 +1513,12 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 		if (frames && failure == FFX_API_RETURN_OK && nativePresent.enabled) {
 			FgRecovered();
 			g.fgRetry.Recovered();
+			g_fgSkipReason = nullptr;
 		}
 		g.stats.presented++;
 		Publish();
 	}
 	return hr;
-}
-
-bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
-	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr);
-
-bool FgPresent(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
-	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
-{
-	__try
-	{
-		return FgPresentInner(sc, sync, flags, original, parameters, hr);
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		DWORD code = GetExceptionCode();
-		if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR || code == EXCEPTION_STACK_OVERFLOW) g.fatal = true;
-		g.teardownDue = true;
-		g.stats.failures++;
-		g.failed = true;
-		Log("FSR stopped: exception 0x%08X in frame generation at present%s.", (unsigned)code, g.fatal ? " (a memory fault: off until the game restarts)" : "");
-		return false;
-	}
-}
-
-bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
-	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
-{
-	if (flags & DXGI_PRESENT_TEST) return false;
-	std::unique_lock<std::mutex> lock(g_renderLock, std::try_to_lock);
-	if (!lock) {
-		g_fgDropNotice.Mark(sc);
-		return false;
-	}
-	InvalidateSkippedFgPresent();
-	if (!g.fgDll || g.fgUnavailable || g.failed || deviceLost) return false;
-	ComPtr<ID3D11Device> device;
-	if (FAILED(sc->GetDevice(IID_PPV_ARGS(&device))) || device.Get() != g.d11Base) return false;
-	DXGI_SWAP_CHAIN_DESC chain{};
-	if (FAILED(sc->GetDesc(&chain)) || !chain.OutputWindow || !IsPresentWindow(chain.OutputWindow)) return false;
-	g.fgRetry.ObserveBackbuffer(chain.BufferDesc.Width, chain.BufferDesc.Height);
-	if (!g.fg) return false;
-	if (!g.fgPending || sync > 4 || (flags & ~DXGI_PRESENT_ALLOW_TEARING) ||
-		(parameters && (parameters->DirtyRectsCount || parameters->pScrollRect || parameters->pScrollOffset)))
-	{
-		if (g.fgPending) g_fgSkipReason = "Present flags or dirty rectangles are incompatible";
-		g.fgPending = g.fgHavePrevious = false;
-		return false;
-	}
-	g.fgPending = false;
-	ComPtr<ID3D11Texture2D> bb;
-	D3D11_TEXTURE2D_DESC bd{};
-	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) bb->GetDesc(&bd);
-	const DXGI_FORMAT format = Typed(bd.Format);
-	// DXGI defaults FP16 swap chains to linear scRGB.
-	const bool scRgb = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-	if (!bd.Width || !bd.Height || !g.fgSceneW || !g.fgSceneH ||
-		bd.SampleDesc.Count != 1 || (format != DXGI_FORMAT_R8G8B8A8_UNORM && !scRgb))
-	{
-		static std::set<DXGI_FORMAT> warned;
-		if (warned.insert(bd.Format).second) {
-			Log("FG waiting for a compatible RGBA8 or scRGB backbuffer: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), samples %u.",
-				g.fgSceneW, g.fgSceneH, bd.Width, bd.Height, FgBackbufferFormatName(bd.Format),
-				bd.Format, bd.SampleDesc.Count);
-		}
-		g.stats.fgSkipped++;
-		g.fgHavePrevious = false;
-		g.fgContent = {};
-		g_fgSkipReason = "Incompatible backbuffer (FG requires single-sample RGBA8 or scRGB)";
-		return false;
-	}
-	const ImageRect content = g.fgViewportOverrideEnabled ? g.fgViewportOverride :
-		FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
-	if (g.fgViewportOverrideEnabled && !FgViewportWithinBackbuffer(content, bd.Width, bd.Height, g.fgSceneW, g.fgSceneH)) {
-		static bool warned = false;
-		if (!warned) {
-			warned = true;
-			Log("FG viewport override %u,%u %ux%u is outside the %ux%u backbuffer or mismatches the %ux%u scene; skipping FG.",
-				content.x,content.y,content.width,content.height,bd.Width,bd.Height,g.fgSceneW,g.fgSceneH);
-		}
-		g_fgSkipReason = "Configured scene viewport is invalid";
-		g.stats.fgSkipped++;
-		g.fgHavePrevious = false;
-		return false;
-	}
-	if (!g_fgDropNotice.IsTarget(sc)) {
-		ComPtr<IDXGISwapChain1> extended;
-		ComPtr<IDXGISwapChain> base;
-		IDXGISwapChain* alternate = nullptr;
-		if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&extended)))) alternate = extended.Get();
-		if (alternate == sc && SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&base)))) alternate = base.Get();
-		g_fgDropNotice.SetTarget(sc, alternate);
-		// Prepare ran before Present, so it could not know that the target
-		// changed. Skip this frame and reset both FG history and frame pacing.
-		g.fgHavePrevious = false;
-		g.fgPendingReset = true;
-		g.fgContent = {};
-		g.fgLastEntry = 0;
-		g.fgIntervalTicks = 0;
-		g.fgRefreshFrames = 0;
-		g.stats.fgSkipped++;
-		g_fgSkipReason = "Game swap chain changed";
-		return false;
-	}
-	const ImageRect previous = g.fgContent;
-	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
-	const bool scaled = letterboxed || bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
-	g.fgContent = content;
-	if (scRgb != g.fgScRgb) {
-		g.fgScRgb = scRgb;
-		g.fgRefreshFrames = 0;
-		g.fgHavePrevious = false;
-		g.stats.fgSkipped++;
-		g_fgSkipReason = "Backbuffer format changed";
-		return false;
-	}
-	if (previous.x != content.x || previous.y != content.y ||
-		previous.width != content.width || previous.height != content.height)
-	{
-		if (letterboxed)
-			Log("FG %s viewport: %u,%u %ux%u in %ux%u.", g.fgViewportOverrideEnabled ? "configured" : "centered", content.x, content.y, content.width, content.height, bd.Width, bd.Height);
-		if (previous.width) {
-			g_fgSkipReason = "Scene viewport changed";
-			g.fgHavePrevious = false;
-			g.stats.fgSkipped++;
-			return false;
-		}
-	}
-	if (GetCurrentThreadId() != g.renderThread && !g.fgCrossThread)
-	{
-		ComPtr<ID3D11Multithread> multithread;
-		if ((device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) || FAILED(g.ctx.As(&multithread))) {
-			g.fgUnavailable = true;
-			g_fgSkipReason = "The D3D11 context cannot be shared between render and Present threads";
-			Log("FG disabled: the render and present threads cannot share the D3D11 context.");
-			return false;
-		}
-		multithread->SetMultithreadProtected(TRUE);
-		g.fgCrossThread = true;
-	}
-	LARGE_INTEGER entry, qf;
-	QueryPerformanceCounter(&entry);
-	QueryPerformanceFrequency(&qf);
-	ObserveFgInterval(entry.QuadPart, qf.QuadPart);
-	if (g.fgRefreshFrames++ % 600 == 0)
-	{
-		MONITORINFOEXW mi = {};
-		mi.cbSize = sizeof mi;
-		DEVMODEW dm = {};
-		dm.dmSize = sizeof dm;
-		if (GetMonitorInfoW(MonitorFromWindow(chain.OutputWindow, MONITOR_DEFAULTTONEAREST), &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
-			g.stats.fgRefreshHz = (float)dm.dmDisplayFrequency;
-		if (scRgb) {
-			ComPtr<IDXGIOutput> output;
-			ComPtr<IDXGIOutput6> extended;
-			DXGI_OUTPUT_DESC1 desc{};
-			g.fgMinNits = 0.0f;
-			g.fgMaxNits = 1000.0f;
-			if (SUCCEEDED(sc->GetContainingOutput(&output)) && SUCCEEDED(output.As(&extended)) &&
-				SUCCEEDED(extended->GetDesc1(&desc)) && desc.MinLuminance >= 0.0f && desc.MaxLuminance > desc.MinLuminance) {
-				g.fgMinNits = desc.MinLuminance;
-				g.fgMaxNits = desc.MaxLuminance;
-			}
-		}
-	}
-	double refreshMs = g.stats.fgRefreshHz > 1 ? 1000.0 / g.stats.fgRefreshHz : 0.0;
-	double intervalMs = g.fgIntervalTicks * 1000.0 / qf.QuadPart;
-	if (sync < 2 && refreshMs > 0 && intervalMs > 0 && intervalMs < 2.0 * refreshMs * 0.98)
-	{
-		g_fgSkipReason = "Present interval too short for interpolation";
-		g.stats.fgNotNeeded++;
-		g.fgHavePrevious = false;
-		return false;
-	}
-
-	bool showGenerated = !g.fgPendingReset && g.fgHavePrevious;
-	bool ok = EnsureShared(g.present, bb.Get(), false, "present colour", false) && EnsureShared(g.gen, bb.Get(), true, "generated frame", false);
-	if (ok && scaled)
-		ok = EnsureScale() &&
-			MakeShared(g.fgColor, g.fgDisplayW, g.fgDisplayH, format, true, "scaled FG input", false, -1) &&
-			MakeShared(g.fgOutput, g.fgDisplayW, g.fgDisplayH, format, true, "scaled FG output", false, -1);
-	if (!ok) {
-		const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), false);
-		g.fgHavePrevious = false;
-		g.stats.fgSkipped++;
-		g_fgSkipReason = "FG backbuffer allocation failed";
-		Log("FG backbuffer allocation failed; %s",
-			delay ? "retrying after a cooldown." : "retries exhausted until a resize/device change.");
-		return false;
-	}
-	const Shared& source = scaled ? g.fgColor : g.present;
-	const Shared& output = scaled ? g.fgOutput : g.gen;
-
-	int slot = (int)(g.submits % Slots);
-	if (!WaitOut(g.allocFence[slot], FrameWaitMs, "FG command allocator reuse")) { Fail("the GPU stopped making progress (above)."); return false; }
-	ReadTimestamps(slot);
-	ID3D12GraphicsCommandList* l = g.list[slot].Get();
-	if (!Check(g.alloc[slot]->Reset(), "FG command allocator Reset") || !Check(l->Reset(g.alloc[slot].Get(), nullptr), "FG command list Reset")) { Fail("FG command list (above)."); return false; }
-
-	g.ctx->CopyResource(g.present.t11.Get(), bb.Get());
-	if (letterboxed && showGenerated)
-		g.ctx->CopyResource(g.gen.t11.Get(), bb.Get());
-	uint64_t ready = ++g.inValue;
-	if (!Check(g.ctx->Signal(g.in11.Get(), ready), "D3D11 Signal (FG)")) { l->Close(); Fail("fence (above)."); return false; }
-	g.ctx->Flush();
-
-	const ImageRect interpolation{0, 0, g.fgDisplayW, g.fgDisplayH};
-	if (scaled) ScaleFrame(l, g.present, g.fgColor, content, interpolation, slot * 4);
-	D3D12_RESOURCE_BARRIER barriers[2];
-	Barrier(source.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, barriers[0]);
-	Barrier(output.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, barriers[1]);
-	l->ResourceBarrier(_countof(barriers), barriers);
-	ffxDispatchDescFrameGeneration d = {};
-	d.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
-	d.commandList = l;
-	d.presentColor = ffxApiGetResourceDX12(source.t12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-	d.outputs[0] = ffxApiGetResourceDX12(output.t12.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-	d.numGeneratedFrames = 1;
-	d.reset = g.fgPendingReset || !g.fgHavePrevious;
-	d.backbufferTransferFunction = scRgb ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-	d.minMaxLuminance[0] = scRgb ? g.fgMinNits : 0.0f;
-	d.minMaxLuminance[1] = scRgb ? g.fgMaxNits : 1.0f;
-	d.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
-	d.frameID = g.fgFrameId;
-	l->EndQuery(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
-	ffxReturnCode_t rc = g.fx.Dispatch(&g.fg, &d.header);
-	l->EndQuery(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
-	g.stats.fgLastResult = (int32_t)rc;
-	for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-	l->ResourceBarrier(_countof(barriers), barriers);
-	if (scaled && rc == FFX_API_RETURN_OK && showGenerated && d.numGeneratedFrames)
-		ScaleFrame(l, g.fgOutput, g.gen, interpolation, content, slot * 4 + 2);
-	l->ResolveQueryData(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, g.readback.Get(), slot * 2 * sizeof(uint64_t));
-	if (!Check(l->Close(), "FG command list Close")) { Fail("FG command list (above)."); return false; }
-	if (!Check(g.queue->Wait(g.in12.Get(), ready), "queue Wait (FG)")) { Fail("fence (above)."); return false; }
-	ID3D12CommandList* lists[] = { l };
-	g.queue->ExecuteCommandLists(1, lists);
-	uint64_t done = ++g.outValue;
-	if (!Check(g.queue->Signal(g.out12.Get(), done), "queue Signal (FG)")) { Fail("fence (above)."); return false; }
-	g.allocFence[slot] = done;
-	g.slotTimed[slot] = true;
-	g.slotFg[slot] = true;
-	g.submits++;
-	if (!Check(g.ctx->Wait(g.out11.Get(), done), "D3D11 Wait (FG)")) { Fail("fence (above)."); return false; }
-	if (rc != FFX_API_RETURN_OK)
-	{
-		FgFailure(3, "dispatch", rc, g.fgFrameId);
-		BackoffFgFailure();
-		g.stats.fgSkipped++;
-		g.fgHavePrevious = false;
-		CheckRemoved();
-		return false;
-	}
-	g.fgHavePrevious = true;
-	FgRecovered();
-	g.fgRetry.Recovered();
-	if (!showGenerated || !d.numGeneratedFrames) {
-		g_fgSkipReason = showGenerated ? "Provider generated no frame" : "History reset or first frame";
-		g.stats.fgSkipped++;
-		return false;
-	}
-
-	g.ctx->CopyResource(bb.Get(), g.gen.t11.Get());
-	// A flip-model Present at interval zero can discard the queued interpolation before scanout.
-	const bool syncPair = sync == 0 && (chain.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
-		chain.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
-	const UINT pairFlags = syncPair ? flags & ~DXGI_PRESENT_ALLOW_TEARING : flags;
-	const UINT generatedSync = syncPair ? 1 : sync < 2 ? sync : sync / 2;
-	const UINT realSync = sync < 2 ? generatedSync : sync - generatedSync;
-	const HRESULT generated = original(sc, generatedSync, pairFlags, parameters);
-	if (generated != S_OK)
-	{
-		g.ctx->CopyResource(bb.Get(), g.present.t11.Get());
-		g.fgHavePrevious = false;
-		*hr = generated;
-		return true;
-	}
-	g.stats.fgGenerated++;
-	if (IsGameFpsWindow(chain.OutputWindow)) CountPresentFrames(0, 1);
-	static bool reportedSync = false;
-	if (syncPair && !reportedSync) {
-		reportedSync = true;
-		Log("FG synchronizes flip-model frame pairs to vblank.");
-	}
-	LARGE_INTEGER t1;
-	QueryPerformanceCounter(&t1);
-	double half = intervalMs * 0.5;
-	if (sync < 2 && half > 0 && (sync == 0 || refreshMs == 0 || half > refreshMs)) Pace(entry.QuadPart, half);
-	LARGE_INTEGER t2;
-	QueryPerformanceCounter(&t2);
-	Average(g.stats.fgPaceMs, (t2.QuadPart - t1.QuadPart) * 1000.0 / qf.QuadPart);
-	ComPtr<ID3D11Texture2D> bb2;
-	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb2))) && bb2)
-	{
-		g.ctx->CopyResource(bb2.Get(), g.present.t11.Get());
-		*hr = original(sc, realSync, pairFlags, parameters);
-		if (SUCCEEDED(*hr)) g.stats.fgReal++;
-		else
-		{
-			g.fgHavePrevious = false;
-			Log("FG real frame Present failed: 0x%08X.", (unsigned)*hr);
-		}
-	}
-	else *hr = DXGI_ERROR_INVALID_CALL;
-	LARGE_INTEGER t3;
-	QueryPerformanceCounter(&t3);
-	Average(g.stats.fgHookMs, (t3.QuadPart - entry.QuadPart) * 1000.0 / qf.QuadPart);
-	Publish();
-	return true;
 }
 
 EXPORT int FSR4_SetFgRadialDistortion(float k1, float k2, float centerX, float centerY)
@@ -2083,22 +1570,7 @@ EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 			return 0;
 		}
 	}
-	std::lock_guard<std::mutex> lock(g_timerLock);
-	if (!g_timerRequested) {
-		MMRESULT result = timeBeginPeriod(1);
-		if (result == TIMERR_NOERROR) g_timerRequested = true;
-		else Log("FG could not request 1ms timer resolution: %u.", (unsigned)result);
-	}
 	return 1;
-}
-
-EXPORT void FSR4_StopFrameGenerationTimer()
-{
-	std::lock_guard<std::mutex> lock(g_timerLock);
-	if (!g_timerRequested) return;
-	MMRESULT result = timeEndPeriod(1);
-	if (result == TIMERR_NOERROR) g_timerRequested = false;
-	else Log("FG could not release 1ms timer resolution: %u.", (unsigned)result);
 }
 
 EXPORT void FSR4_SetFgViewportOverride(uint32_t x, uint32_t y, uint32_t width, uint32_t height)

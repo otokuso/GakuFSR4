@@ -1,6 +1,6 @@
 # AMD Frame Generation SwapChain proof of concept (#23)
 
-The native D3D12 AMD SwapChain is a separate technology from the existing manual FSR FG dispatch + two Present calls. The current game is still rendered with Direct3D 11, while the AMD API requires a Direct3D 12 command queue as its presentation owner.
+GakuFSR4 uses the native D3D12 AMD SwapChain for FG. The game renders with Direct3D 11 and the AMD SwapChain presents through a Direct3D 12 command queue.
 
 `test_native_swapchain` is an **isolated Windows-only experiment**. It does not inject into GakuLoader or replace the Unity swapchain. The program:
 
@@ -26,9 +26,9 @@ The test submits 480 source frames at a target of 60 FPS. `--borderless` uses th
 
 ## Game integration
 
-The opt-in game path uses `FrameGeneration=1` and `NativeSwapChain=1` at startup. The Unity factory hook creates an AMD-owned D3D12 SwapChain and exposes an RGBA8 D3D11 texture at buffer index 0. The typeless texture allows Unity to create an sRGB render-target view. The existing bridge supplies depth and motion to the AMD callback and copies the final composited backbuffer at Present. A resize drains outstanding native work before replacing the buffer and resetting FG history.
+Set `FrameGeneration=1` before starting the game to enable FG. The Unity factory hook creates an AMD-owned D3D12 SwapChain and exposes an RGBA8 D3D11 texture at buffer index 0. The typeless texture allows Unity to create an sRGB render-target view. The existing bridge supplies depth and motion to the AMD callback and copies the final composited backbuffer at Present. A resize drains outstanding native work before replacing the buffer and resetting FG history.
 
-Unsupported startup descriptors or SDK startup failures use the existing manual path. After a native chain has been created, restart with `NativeSwapChain=0` to switch back. This path keeps native D3D11 rendering. It uses the final composited colour, including the game's UI, as the FG source. It currently supports single-sample RGBA8 SDR. Device-loss recovery and live HDR transitions still need validation.
+Startup requires a single-sample RGBA8 SDR flip-model swap chain. Unsupported descriptors and SDK startup failures continue through the game’s swap chain with real frames and FSR upscaling. Set `FrameGeneration=0` and restart to disable FG. The FG source is the final composited colour, including the game’s UI. Device-loss recovery and live HDR transitions still need validation.
 
 The game launched the AMD SwapChain 4.0.0 and FG 4.0.2 on the RX 9070 XT in Quality mode. The title screen displayed correctly after allowing the sRGB view, and the game recreated the buffers on transition from portrait to fullscreen landscape. A ten-second fullscreen live capture showed 595 displayed application intervals and 595 AMD-generated intervals with SyncInterval 0, at about 120 displayed FPS. The native chain used Composed Flip in that capture. A later capture contained 21 independent-flip intervals with tearing allowed, but most frames still used Composed Flip. The public AMD SDK APIs used here do not report whether the driver selected DAFP. The capture proves actual in-game interpolation and records the observed presentation modes.
 
@@ -54,6 +54,6 @@ The same Radeon system ran both colour paths at 3840×2160 borderless with FG en
 | Native D3D11, shared texture | 120.04 | 22.08 ms | 1.48 s | 573.6 MiB |
 | D3D11On12, wrapped backbuffers | 119.98 | 22.26 ms | 0.97 s | 559.2 MiB |
 
-Each row is a single eight-second synthetic run. CPU time is for the whole process. VRAM is the maximum of the per-process dedicated usage sampled about once per second. The run confirms independent presentation with tearing allowed. It provides no direct measurement of the active AMD pacing mechanism or the monitor's VRR refresh. The existing manual game path and input-to-display latency still need a matched comparison. D3D11On12 compatibility with Unity's full renderer also remains open.
+Each row is a single eight-second synthetic run. CPU time is for the whole process. VRAM is the maximum of the per-process dedicated usage sampled about once per second. The run confirms independent presentation with tearing allowed. It provides no direct measurement of the active AMD pacing mechanism or the monitor's VRR refresh. Input-to-display latency still needs a matched in-game comparison with FG off. D3D11On12 compatibility with Unity's full renderer also remains open.
 
 References: [AMD SwapChain integration and DAFP prerequisites](https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-swap-chain/) · [DXGI flip-model swapchain creation](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforhwnd) · [Direct3D 11 on 12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-11-on-12)

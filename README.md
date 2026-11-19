@@ -16,7 +16,6 @@
 | --- | --- |
 | **FSR 4 アップスケーリング** | Native AA / Quality / Balanced / Performance / Ultra Performance に対応。FSR 4.1.2で実機動作を確認 |
 | **FSR Frame Generation** | 対応する3Dシーンで最大2倍相当の表示フレームを生成。FSR FG 4.0.2で実機動作を確認。初期設定ではOFF |
-| **2種類のFG表示経路** | 手動Present方式（既定）と、実験的なAMD公式SwapChain方式を切り替え可能 |
 | **GakuLoader内の設定画面** | F1メニューからFSR、FG、画質プリセット、シャープネスを設定可能 |
 | **動作状況・タイミング表示** | 実ゲームFPSとPresent FPS、FGのスキップ理由、処理時間、CPU側のフレーム間隔・入力タイミングなどを表示 |
 
@@ -124,13 +123,11 @@ Preset=Quality
 Sharpness=0.2
 FrameGeneration=0
 JitterPhaseMode=2
-NativeSwapChain=0
 ```
 
 - `Enabled=0` でプラグインを無効化します。
 - `Sharpness` は `0.0`～`1.0` で指定します（UIでは0～100%）。
-- `FrameGeneration=1` でFGを試します。初期値は `0` です。
-- `NativeSwapChain=1` は**実験的なAMD公式SwapChain方式**を有効にします。`FrameGeneration=1` も必要です。
+- `FrameGeneration=1` でAMD Native SwapChainによるFGを有効にします。初期値は `0` です。旧設定の `NativeSwapChain` は無視されます。
 - Native AAの画面カメラは、UnityのTAAパスでFSRを実行します。旧設定 `NativeAABeforePost` は無視されます。
 - `JitterPhaseMode=2` **（新しい既定値）** はNative AAだけFSR推奨の8周期にし、Quality以上は従来のUnity 1024周期を維持します。`0` はすべてUnity 1024周期（旧設定）、`1` はすべてFSR推奨周期です。既存のINIに `JitterPhaseMode=0` が書かれている場合は自動変更されないため、8周期を使うには `2` に変更してください。
 - `ProviderVersion=4.1.2` のように指定すると、使うFSR 4.xプロバイダーのバージョンを固定できます。指定版が見つからない場合はFSRを開始しません。省略時は利用可能な4.xのうち最新のバージョンを選びます。**FSR 3への自動切り替えはありません。**
@@ -142,21 +139,14 @@ Native AAの画質を検証するときは、まずFGを無効にし、シャー
 
 ## Frame Generationの注意点
 
-FGには2つの表示経路があります。
-
-| `NativeSwapChain` | 表示経路 | 特徴 |
-| --- | --- | --- |
-| `0`（既定） | **手動Present** | D3D11のゲーム映像とD3D12側の補間結果を手動で表示。独自のフレーム間隔調整を使用 |
-| `1`（実験） | **AMD公式SwapChain** | AMDのD3D12 SwapChainに表示を委ねる経路。対応しない起動条件では手動方式へフォールバック |
-
-AMD公式SwapChain方式でも、ドライバー側のペーシング機構（DAFP）やVRRの動作が必ず有効になるわけではありません。実機での検証条件と結果は[AMD SwapChain検証記録](docs/NATIVE_FG_SWAPCHAIN.md)にまとめています。動作中に問題が起きた場合は `NativeSwapChain=0` に戻してゲームを再起動してください。
+FGはAMD Native SwapChainを使います。起動時に対応条件を満たさない場合やSwapChainの作成に失敗した場合は、ゲームのSwapChainで実フレームを表示し、FSRアップスケーリングを続けます。DAFPやVRRの動作条件と実機での測定結果は、[AMD SwapChain検証記録](docs/NATIVE_FG_SWAPCHAIN.md)を参照してください。
 
 **現時点でのFGの主な制約**
 
-- **RGBA8 SDRとRGBA16F scRGB**のバックバッファに対応します。ReShadeのAutoHDRと併用する場合は `FrameGeneration=1` と `NativeSwapChain=0` を設定してください。BGRA8やRGB10A2では実フレームを表示します。
+- FGはシングルサンプルの **RGBA8 SDR** のフリップモデルに対応します。ReShade AutoHDRなどでバックバッファがRGBA16F scRGBになる場合は、実フレームを表示します。
 - FGの入力には最終的な合成映像を使うため、画面内のUIや字幕まで補間される場合があります。UIを完全に分離して後から合成する処理は未実装です。
 - 黒帯のある画面では中央の映像領域を対象にし、黒帯などを実フレームから残します。中央以外の映像配置に対する自動Viewport検出は未実装です。
-- 表示間隔が短すぎる、対応するシーンを取得できない、GPU側で失敗した等の場合は、補間フレームをスキップします。
+- 対応するシーンを取得できない場合や、FGのGPU処理が失敗した場合は、補間フレームをスキップします。
 - 画面の切り替え、リサイズ、デバイス喪失、HDRの切り替えなどは引き続き検証が必要です。
 
 見た目に問題がある場合は、まず `FrameGeneration=0` に戻してFSRアップスケーリング単独で比較してください。
@@ -184,13 +174,13 @@ GakuLoaderのGakuFSR4パネルに、以下の診断情報が表示されます�
 
 表示FPS、フレーム間隔のp95/p99、入力から表示までのソフトウェア推定遅延を比較するには、[Intel PresentMon 2.x](https://github.com/GameTechDev/PresentMon)で記録したCSVを使います。
 
-1. 同じ3Dシーン・解像度・ドライバー・リフレッシュレートで、**FG OFF / 手動FG / AMD SwapChain FG** を別々に計測します。
+1. 同じ3Dシーン・解像度・ドライバー・リフレッシュレートで、**FG OFF / AMD SwapChain FG** を別々に計測します。
 2. PresentMonで対象ゲームのプロセスを指定してCSVへ記録します。FGの判別用に `--track_frame_type` を有効にします。
 3. 次のスクリプトでCSVを比較します。`GAME.exe` とPresentMonのパスは環境に合わせて置き換えてください。
 
 ```powershell
-.\PresentMon-2.x-x64.exe --process_name GAME.exe --track_frame_type --timed 45 --terminate_after_timed --output_file manual-fg.csv
-python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv manual-fg.csv native-fg.csv
+.\PresentMon-2.x-x64.exe --process_name GAME.exe --track_frame_type --timed 45 --terminate_after_timed --output_file native-fg.csv
+python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv native-fg.csv
 ```
 
 このスクリプトは表示フレーム間隔とPresentMon由来の入力遅延推定値を集計します。入力サンプルがないときは遅延を0msとして扱わず、`--require-input` 指定時はエラーになります。実際のクリックから画素応答までを厳密に測定したい場合は、別途光学計測が必要です。
@@ -204,7 +194,7 @@ python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv m
 | F1にGakuFSR4が出ない | `GakuFSR4.dll` の配置先、GakuLoaderの導入状況、ログを確認 |
 | FSRが動作しない | `Enabled=1`、AMDのloader/upscaler DLL、対応GPU、`FSR active` / `AMD FSR DLL loading failed` 等のログを確認 |
 | FGが動作しない | `FrameGeneration=1`、FG用DLL、Windows/GPU要件、バックバッファ形式、`Last FG skip` を確認。条件に合わなければ補間されません |
-| FGで画面が乱れる・カクつく | `NativeSwapChain=0` に戻して再起動し、手動FGと比較。解決しなければ `FrameGeneration=0` で比較 |
+| FGで画面が乱れる・カクつく | `FrameGeneration=0` に設定して再起動し、FSR単独の動作と比較 |
 | 設定を変えたのに反映されない | `Save settings` を押したか、正しいINIを編集したか確認し、**ゲームを再起動** |
 | 入力遅延が `--` になる | 入力イベントを取得できないケースがあります。値がない状態であって、遅延がゼロという意味ではありません |
 
@@ -219,7 +209,7 @@ python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv m
 | [GPU_TESTING.md](docs/GPU_TESTING.md) | GPU実機検証、検証用実行ファイル、CIで確認できない範囲 |
 | [BENCHMARKING.md](docs/BENCHMARKING.md) | PresentMonによるFPS・ペーシング・入力タイミングの計測 |
 | [NATIVE_FG_SWAPCHAIN.md](docs/NATIVE_FG_SWAPCHAIN.md) | AMD公式SwapChain経路と実機検証記録 |
-| [FRAME_PACING.md](docs/FRAME_PACING.md) | 手動Presentの待機処理・比較計測 |
+| [FRAME_PACING.md](docs/FRAME_PACING.md) | 旧手動Present方式の計測記録 |
 | [FG_FORMAT_SUPPORT.md](docs/FG_FORMAT_SUPPORT.md) | FGのバックバッファ形式とHDR制約 |
 | [FG_UI_COMPOSITION.md](docs/FG_UI_COMPOSITION.md) | UI分離・合成に関する現状と未実装部分 |
 | [FG_DISTORTION.md](docs/FG_DISTORTION.md) | FG用の実験的な歪みフィールド |

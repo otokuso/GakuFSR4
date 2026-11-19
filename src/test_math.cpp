@@ -10,7 +10,6 @@
 #include "ExposurePolicy.h"
 #include "PresentHookSlots.h"
 #include "PresentHookRetry.h"
-#include "FgDropNotice.h"
 #include "FgCameraValidation.h"
 #include "TaaJitter.h"
 #include "Preset.h"
@@ -19,8 +18,6 @@
 #include <cassert>
 #include <climits>
 #include <limits>
-#include <mutex>
-#include <thread>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
 static_assert(!frame_math::SceneCamera(true,false,true,false,false));
@@ -277,38 +274,6 @@ int main() {
     assert(presentProbe.Allow(6000));
     assert(!presentProbe.Allow(6001));
     assert(presentProbe.Allow(100)); // permit re-probe if the monotonic clock resets
-    FgDropNotice dropNotice;
-    int gameChain=0, gameChain1=0, otherChain=0;
-    dropNotice.SetTarget(&gameChain,&gameChain1);
-    {
-        std::mutex renderLock;
-        std::lock_guard<std::mutex> rendering(renderLock);
-        std::thread present([&] {
-            std::unique_lock<std::mutex> lock(renderLock,std::try_to_lock);
-            assert(!lock.owns_lock());
-            dropNotice.Mark(&otherChain);
-            assert(!dropNotice.Consume());
-
-            dropNotice.Mark(&gameChain);
-            dropNotice.Mark(&gameChain1);
-        });
-        present.join();
-        assert(dropNotice.Consume());
-        assert(!dropNotice.Consume());
-    }
-    dropNotice.Mark(&gameChain1);
-    assert(dropNotice.Consume());
-    dropNotice.SetTarget(&otherChain);
-    assert(!dropNotice.IsTarget(&gameChain));
-    assert(!dropNotice.IsTarget(&gameChain1));
-    assert(dropNotice.IsTarget(&otherChain));
-    dropNotice.Mark(&gameChain1);
-    assert(!dropNotice.Consume());
-    dropNotice.Mark(&otherChain);
-    assert(dropNotice.Consume());
-    dropNotice.SetTarget(nullptr);
-    dropNotice.Mark(&gameChain);
-    assert(!dropNotice.Consume());
     PrimaryCamera camera;
     assert(camera.Allow(11,10));
     assert(!camera.Allow(22,10));

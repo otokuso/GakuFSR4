@@ -49,7 +49,7 @@ vectors are correct.
 - Unity's own TAA persistent targets may still be allocated while the TAA pass
   is intercepted. Do not bypass target allocation without verifying original
   TAA fallback, camera stacks and offscreen RenderTextures.
-- The manual FG Present path has no validated independent UI compositor.
+- The native FG SwapChain uses the final composited frame, including UI.
   Early Native AA intentionally does not expose its pre-post-process result as
   the HUD-less final-scene diagnostic; see [FG UI composition](FG_UI_COMPOSITION.md).
 - A scene cut that changes content without changing camera identity, transform,

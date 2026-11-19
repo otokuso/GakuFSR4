@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <utility>
 
-bool CaptureGameSwapChain(const GakuHookService& hooks, bool nativeSwapchain);
+bool CaptureGameSwapChain(const GakuHookService& hooks, bool enableFrameGeneration);
 
 namespace gakufsr {
 using P = void*;
@@ -46,7 +46,6 @@ void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
 void Stop(const std::string& why) {
     enabled=false;
     renderWork.CancelPackets();
-    FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
 
@@ -829,7 +828,6 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         if(x<0||y<0||w<0||h<0||((w==0)!=(h==0))||(!w&&(x||y))) {
             Log("Invalid FGViewport override; skipping frame generation",GAKU_LOG_WARNING);
             frameGeneration=false;
-            FSR4_StopFrameGenerationTimer();
         } else {
             FSR4_SetFgViewportOverride(x,y,w,h);
         }
@@ -852,8 +850,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(ratio==1.0f)
         Log("Native AA route: screen TAA pass; jitter sequence "+
             std::to_string(SelectJitterPhaseCount(jitterPhaseMode,ratio))+" phases");
-    const bool nativeSwapchain=GetPrivateProfileIntW(L"FSR4",L"NativeSwapChain",0,config.c_str())==1;
-    if(!CaptureGameSwapChain(hooks,frameGeneration&&nativeSwapchain))
+    if(!CaptureGameSwapChain(hooks,frameGeneration))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
 }
@@ -879,7 +876,6 @@ void Shutdown(P) {
     enabled=false;
     StopGameInputHook();
     renderWork.CancelPackets();
-    FSR4_StopFrameGenerationTimer();
     primaryCamera.Reset();
     capture.camera.Clear();capture.motion.Clear();
     resources.ClearIdleRoots();
