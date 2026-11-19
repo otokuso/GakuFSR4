@@ -28,6 +28,9 @@ inline int RenderSize(int display, float ratio) {
 inline float Jitter(float matrixOffset, int renderSize) {
     return -matrixOffset * renderSize * 0.5f;
 }
+inline float MotionVectorYScale(int renderHeight, int sign) {
+    return static_cast<float>(renderHeight) * sign;
+}
 inline bool Reset(int camera, int oldCamera, int frame, int oldFrame,
                   float fov, float oldFov, const float* pos, const float* oldPos) {
     float distance = 0;
