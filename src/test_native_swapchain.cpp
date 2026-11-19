@@ -7,11 +7,18 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <type_traits>
+#include <utility>
 #include "ffx_api.h"
 #include "ffx_api_loader.h"
+#include "ffx_framegeneration.h"
 #include "dx12/ffx_api_framegeneration_dx12.h"
 
 using Microsoft::WRL::ComPtr;
@@ -20,6 +27,14 @@ static void Check(HRESULT hr, const char* operation)
 {
     if (FAILED(hr)) {
         printf("%s failed: HRESULT 0x%08X\n", operation, static_cast<unsigned>(hr));
+        throw std::runtime_error(operation);
+    }
+}
+
+static void CheckFx(ffxReturnCode_t rc, const char* operation)
+{
+    if (rc != FFX_API_RETURN_OK) {
+        printf("%s failed: FFX error %u\n", operation, static_cast<unsigned>(rc));
         throw std::runtime_error(operation);
     }
 }
@@ -36,10 +51,87 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURC
     return barrier;
 }
 
+static constexpr UINT frameCount = 480;
+
+// The test uses flat depth and static vectors to validate the dispatch and presentation path.
+static ComPtr<ID3D12Resource> MakeInput(ID3D12Device* device, ID3D12GraphicsCommandList* list,
+    UINT width, UINT height, DXGI_FORMAT format, D3D12_CPU_DESCRIPTOR_HANDLE rtv, const float (&clear)[4])
+{
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    ComPtr<ID3D12Resource> input;
+    Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&input)), "Create FG test input");
+    device->CreateRenderTargetView(input.Get(), nullptr, rtv);
+    list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+    const auto barrier = Transition(input.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list->ResourceBarrier(1, &barrier);
+    return input;
+}
+
+struct Interpolation {
+    const ffxFunctions& fx;
+    ffxContext swapchainContext;
+    ffxContext context = nullptr;
+    ffxConfigureDescFrameGeneration config{};
+    std::atomic<unsigned> generated{0};
+    std::atomic<unsigned> failure{FFX_API_RETURN_OK};
+
+    void Configure(uint64_t frameID)
+    {
+        config.frameID = frameID;
+        CheckFx(fx.Configure(&context, &config.header), "Configure native FG");
+    }
+
+    static ffxReturnCode_t Dispatch(ffxDispatchDescFrameGeneration* params, void* user)
+    {
+        auto& self = *static_cast<Interpolation*>(user);
+        const auto result = self.fx.Dispatch(&self.context, &params->header);
+        if (result == FFX_API_RETURN_OK) self.generated += params->numGeneratedFrames;
+        else self.failure = result;
+        return result;
+    }
+
+    ffxReturnCode_t Drain()
+    {
+        if (!context) return FFX_API_RETURN_OK;
+        ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 wait{};
+        wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
+        const auto waitResult = fx.Dispatch(&swapchainContext, &wait.header);
+        config.frameGenerationEnabled = false;
+        const auto disableResult = fx.Configure(&context, &config.header);
+        // The runtime may leave the caller's handle unchanged after successful destruction.
+        auto closing = std::exchange(context, nullptr);
+        const auto destroyResult = fx.DestroyContext(&closing, nullptr);
+        if (waitResult != FFX_API_RETURN_OK) return waitResult;
+        if (disableResult != FFX_API_RETURN_OK) return disableResult;
+        return destroyResult;
+    }
+
+    ~Interpolation() { Drain(); }
+};
+
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc != 2) {
-        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory>");
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    bool enableFg = false, borderless = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::wstring option = argv[i];
+        if (option == L"--fg" && !enableFg) enableFg = true;
+        else if (option == L"--borderless" && !borderless) borderless = true;
+        else return 2;
+    }
+    if (argc < 2) {
+        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory> [--fg] [--borderless]");
         return 2;
     }
     std::wstring directory = argv[1];
@@ -54,7 +146,7 @@ int wmain(int argc, wchar_t** argv)
     }
     ffxFunctions fx{};
     ffxLoadFunctions(&fx, loader);
-    if (!fx.CreateContext || !fx.DestroyContext) return 4;
+    if (!fx.CreateContext || !fx.DestroyContext || !fx.Configure || !fx.Dispatch) return 4;
 
     try {
         ComPtr<IDXGIFactory4> factory;
@@ -90,19 +182,53 @@ int wmain(int argc, wchar_t** argv)
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"GakuFSR4NativeSwapchainTest";
         RegisterClassW(&wc);
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        UINT width = 960, height = 540;
+        DWORD style = WS_OVERLAPPEDWINDOW;
+        RECT bounds{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+        UINT presentFlags = 0, swapFlags = 0;
+        if (borderless) {
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            MONITORINFO monitor{sizeof monitor};
+            if (!GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &monitor))
+                throw std::runtime_error("Could not resolve the monitor for the borderless test");
+            bounds = monitor.rcMonitor;
+            width = bounds.right - bounds.left;
+            height = bounds.bottom - bounds.top;
+            style = WS_POPUP;
+            ComPtr<IDXGIFactory5> factory5;
+            BOOL tearing = FALSE;
+            Check(factory.As(&factory5), "IDXGIFactory5");
+            Check(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof tearing),
+                "Check tearing support");
+            if (!tearing) throw std::runtime_error("Borderless test requires DXGI tearing support");
+            swapFlags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            presentFlags = DXGI_PRESENT_ALLOW_TEARING;
+        } else {
+            AdjustWindowRect(&bounds, style, FALSE);
+        }
         HWND window = CreateWindowExW(0, wc.lpszClassName, L"AMD FG SwapChain interop test",
-            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 400, 360,
+            style, borderless ? bounds.left : CW_USEDEFAULT, borderless ? bounds.top : CW_USEDEFAULT,
+            bounds.right - bounds.left, bounds.bottom - bounds.top,
             nullptr, nullptr, wc.hInstance, nullptr);
         if (!window) throw std::runtime_error("Test window creation failed");
+        std::unique_ptr<std::remove_pointer_t<HWND>, decltype(&DestroyWindow)> ownedWindow(window, DestroyWindow);
         ShowWindow(window, SW_SHOWNORMAL);
+        if (borderless) {
+            SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            SetForegroundWindow(window);
+        }
 
         DXGI_SWAP_CHAIN_DESC1 swapDesc{};
-        swapDesc.Width = swapDesc.Height = 256;
+        swapDesc.Width = width;
+        swapDesc.Height = height;
         swapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         swapDesc.SampleDesc.Count = 1;
         swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapDesc.BufferCount = 2;
         swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        swapDesc.Flags = swapFlags;
         ffxCreateContextDescFrameGenerationSwapChainVersionDX12 version{};
         version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
         version.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
@@ -123,10 +249,15 @@ int wmain(int argc, wchar_t** argv)
         }
         ComPtr<IDXGISwapChain4> swapchain;
         swapchain.Attach(rawSwapchain);
-        puts("AMD native D3D12 FG SwapChain created. Creating shared D3D11 content...");
+        const auto destroySwapchain = [&fx](ffxContext context) { fx.DestroyContext(&context, nullptr); };
+        std::unique_ptr<void, decltype(destroySwapchain)> ownedSwapchain(swapchainContext, destroySwapchain);
+        printf("AMD native D3D12 FG SwapChain: %ux%u, %s, FG %s, SyncInterval 0, tearing %s.\n",
+            width, height, borderless ? "borderless" : "windowed", enableFg ? "on" : "off",
+            presentFlags ? "allowed" : "disabled");
 
         D3D11_TEXTURE2D_DESC textureDesc{};
-        textureDesc.Width = textureDesc.Height = 256;
+        textureDesc.Width = width;
+        textureDesc.Height = height;
         textureDesc.MipLevels = textureDesc.ArraySize = 1;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -137,8 +268,6 @@ int wmain(int argc, wchar_t** argv)
         Check(d11->CreateTexture2D(&textureDesc, nullptr, &input11), "D3D11 CreateTexture2D");
         ComPtr<ID3D11RenderTargetView> target;
         Check(d11->CreateRenderTargetView(input11.Get(), nullptr, &target), "CreateRenderTargetView");
-        const float green[]{0.1f, 0.8f, 0.3f, 1.0f};
-        ctx->ClearRenderTargetView(target.Get(), green);
         ComPtr<IDXGIResource1> dxgiResource;
         Check(input11.As(&dxgiResource), "IDXGIResource1");
         HANDLE textureHandle = nullptr;
@@ -157,38 +286,117 @@ int wmain(int argc, wchar_t** argv)
         const HRESULT fenceOpenResult = d12->OpenSharedHandle(fenceHandle, IID_PPV_ARGS(&fence12));
         CloseHandle(fenceHandle);
         Check(fenceOpenResult, "D3D12 OpenSharedFence");
-        Check(ctx->Signal(fence11.Get(), 1), "D3D11 Signal");
-        ctx->Flush();
-        Check(queue->Wait(fence12.Get(), 1), "D3D12 queue Wait");
-
+        std::unique_ptr<void, decltype(&CloseHandle)> fenceEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr), CloseHandle);
+        if (!fenceEvent) throw std::runtime_error("Could not create GPU fence event");
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> list;
         Check(d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "CreateCommandAllocator");
         Check(d12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
             IID_PPV_ARGS(&list)), "CreateCommandList");
-        ComPtr<ID3D12Resource> backbuffer;
-        Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)), "GetBuffer");
-        auto b1 = Transition(input12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        auto b2 = Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_RESOURCE_BARRIER barriers[]{b1,b2};
-        list->ResourceBarrier(2, barriers);
-        list->CopyResource(backbuffer.Get(), input12.Get());
-        b1 = Transition(input12.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-        b2 = Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-        barriers[0] = b1;barriers[1] = b2;
-        list->ResourceBarrier(2, barriers);
-        Check(list->Close(), "CommandList Close");
-        ID3D12CommandList* execute[]{list.Get()};
-        queue->ExecuteCommandLists(1, execute);
-        Check(swapchain->Present(1, 0), "AMD FG SwapChain Present");
-        Check(queue->Signal(fence12.Get(), 2), "D3D12 Signal");
-        for (int n = 0; n < 500 && fence12->GetCompletedValue() < 2; ++n) Sleep(10);
-        if (fence12->GetCompletedValue() < 2) throw std::runtime_error("GPU fence did not finish");
-        puts("PASS: D3D11 colour -> shared texture -> D3D12 copy -> AMD native SwapChain Present.");
-        puts("This does not test generated frames, driver-assisted pacing, or Unity SwapChain interception.");
-        fx.DestroyContext(&swapchainContext, nullptr);
-        swapchain.Reset();
-        DestroyWindow(window);
+        ComPtr<ID3D12DescriptorHeap> rtvs;
+        ComPtr<ID3D12Resource> depth, motion;
+        Interpolation fg{fx, swapchainContext};
+        if (enableFg) {
+            D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+            heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            heapDesc.NumDescriptors = 2;
+            Check(d12->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvs)), "Create RTV heap");
+            auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+            const float flatDepth[]{0.5f, 0.0f, 0.0f, 0.0f};
+            const float zeroMotion[]{0.0f, 0.0f, 0.0f, 0.0f};
+            depth = MakeInput(d12.Get(), list.Get(), width, height, DXGI_FORMAT_R32_FLOAT, rtv, flatDepth);
+            rtv.ptr += d12->GetDescriptorHandleIncrementSize(heapDesc.Type);
+            motion = MakeInput(d12.Get(), list.Get(), width, height, DXGI_FORMAT_R16G16_FLOAT, rtv, zeroMotion);
+
+            ffxCreateContextDescFrameGenerationVersion fgVersion{};
+            fgVersion.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+            fgVersion.version = FFX_FRAMEGENERATION_VERSION;
+            ffxCreateBackendDX12Desc backend{};
+            backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+            backend.header.pNext = &fgVersion.header;
+            backend.device = d12.Get();
+            ffxCreateContextDescFrameGeneration desc{};
+            desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+            desc.header.pNext = &backend.header;
+            desc.displaySize = desc.maxRenderSize = {width, height};
+            desc.backBufferFormat = FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+            CheckFx(fx.CreateContext(&fg.context, &desc.header, nullptr), "Create native FG");
+            fg.config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+            fg.config.swapChain = swapchain.Get();
+            fg.config.frameGenerationCallback = Interpolation::Dispatch;
+            fg.config.frameGenerationCallbackUserContext = &fg;
+            fg.config.frameGenerationEnabled = true;
+            fg.config.generationRect = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
+        }
+
+        const auto start = std::chrono::steady_clock::now();
+        for (UINT frame = 0; frame < frameCount; ++frame) {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+            if (!IsWindow(window)) throw std::runtime_error("Test window closed");
+            std::this_thread::sleep_until(start + std::chrono::microseconds(frame * 1000000ull / 60));
+            if (frame) {
+                Check(allocator->Reset(), "Reset command allocator");
+                Check(list->Reset(allocator.Get(), nullptr), "Reset command list");
+            }
+            const float background[]{0.1f, 0.2f, 0.3f, 1.0f};
+            const float green[]{0.1f, 0.8f, 0.3f, 1.0f};
+            const auto boxWidth = static_cast<LONG>(width / 10);
+            const auto left = static_cast<LONG>(frame * (width / 160) % (width - boxWidth));
+            const D3D11_RECT rect{left, static_cast<LONG>(height * 2 / 5), left + boxWidth,
+                static_cast<LONG>(height * 3 / 5)};
+            ctx->ClearRenderTargetView(target.Get(), background);
+            ctx->ClearView(target.Get(), green, &rect, 1);
+            const uint64_t ready = 2ull * frame + 1;
+            Check(ctx->Signal(fence11.Get(), ready), "D3D11 Signal");
+            ctx->Flush();
+            Check(queue->Wait(fence12.Get(), ready), "D3D12 queue Wait");
+
+            ComPtr<ID3D12Resource> backbuffer;
+            Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)), "GetBuffer");
+            const D3D12_RESOURCE_BARRIER before[]{
+                Transition(input12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST)};
+            list->ResourceBarrier(2, before);
+            list->CopyResource(backbuffer.Get(), input12.Get());
+            const D3D12_RESOURCE_BARRIER after[]{
+                Transition(input12.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT)};
+            list->ResourceBarrier(2, after);
+            if (enableFg) {
+                fg.Configure(frame + 1);
+                ffxDispatchDescFrameGenerationPrepareV2 prepare{};
+                prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+                prepare.frameID = fg.config.frameID;
+                prepare.commandList = list.Get();
+                prepare.renderSize = {width, height};
+                prepare.motionVectorScale = {static_cast<float>(width), static_cast<float>(height)};
+                prepare.frameTimeDelta = 1000.0f / 60;
+                prepare.reset = frame == 0;
+                prepare.cameraNear = 0.1f;
+                prepare.cameraFar = 100.0f;
+                prepare.cameraFovAngleVertical = 1.0f;
+                prepare.viewSpaceToMetersFactor = 1.0f;
+                prepare.cameraUp[1] = prepare.cameraRight[0] = prepare.cameraForward[2] = 1.0f;
+                prepare.depth = ffxApiGetResourceDX12(depth.Get());
+                prepare.motionVectors = ffxApiGetResourceDX12(motion.Get());
+                CheckFx(fx.Dispatch(&fg.context, &prepare.header), "Prepare native FG");
+            }
+            Check(list->Close(), "CommandList Close");
+            ID3D12CommandList* execute[]{list.Get()};
+            queue->ExecuteCommandLists(1, execute);
+            const HRESULT present = swapchain->Present(0, presentFlags);
+            Check(queue->Signal(fence12.Get(), ready + 1), "D3D12 Signal");
+            Check(fence12->SetEventOnCompletion(ready + 1, fenceEvent.get()), "SetEventOnCompletion");
+            if (WaitForSingleObject(fenceEvent.get(), 5000) != WAIT_OBJECT_0)
+                throw std::runtime_error("GPU fence did not finish");
+            Check(present, "AMD FG SwapChain Present");
+        }
+        CheckFx(fg.Drain(), "Drain native FG");
+        CheckFx(fg.failure.load(), "Native FG callback");
+        if (enableFg && fg.generated == 0) throw std::runtime_error("No native FG output was dispatched");
+        printf("PASS: %u D3D11 frames presented through the AMD native SwapChain, %u interpolated frames dispatched.\n",
+            frameCount, fg.generated.load());
         return 0;
     } catch (const std::exception& e) {
         printf("Native FG SwapChain proof of concept failed: %s\n", e.what());
