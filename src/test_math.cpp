@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "FgViewportMath.h"
 #include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -17,6 +18,17 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    auto portraitOnLandscape = FgAspectFit(1920,1080,1080,1920);
+    assert(portraitOnLandscape.x==656 && portraitOnLandscape.y==0);
+    assert(portraitOnLandscape.width==608 && portraitOnLandscape.height==1080);
+    auto landscapeOnPortrait = FgAspectFit(1080,1920,1920,1080);
+    assert(landscapeOnPortrait.x==0 && landscapeOnPortrait.y==656);
+    assert(landscapeOnPortrait.width==1080 && landscapeOnPortrait.height==608);
+    auto letterbox = FgAspectFit(1920,1080,3840,1634);
+    assert(letterbox.x==0 && letterbox.y==131 && letterbox.width==1920 && letterbox.height==817);
+    auto same = FgAspectFit(1920,1080,1280,720);
+    assert(same.x==0 && same.y==0 && same.width==1920 && same.height==1080);
+    assert(FgAspectFit(1920,1080,0,1080).width==0);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
