@@ -9,6 +9,7 @@
 #include <mutex>
 #include "GakuPlugin.h"
 #include "../../src/PresentHookSlots.h"
+#include "../../src/NativeSwapchain.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -30,6 +31,7 @@ namespace
 	CreateFn g_create = nullptr;
 	CreateForHwndFn g_createForHwnd = nullptr;
 	std::atomic<bool> g_capture{ false };
+	std::atomic<bool> g_tryNative{ false };
 	bool g_tried = false;
 	std::atomic<bool> g_hooked{ false };
 	std::atomic<HWND> g_window{ nullptr };
@@ -123,20 +125,64 @@ namespace
 		BridgeLog("Present hook: Present=%d Present1=%d.", present, present1);
 	}
 
-	void CaptureChain(HWND window, IDXGISwapChain* chain)
+	bool UnityWindow(HWND window)
 	{
 		wchar_t name[64]{};
-		if (GetClassNameW(window, name, _countof(name)) && wcscmp(name, L"UnityWndClass") == 0) {
+		return GetClassNameW(window, name, _countof(name)) && wcscmp(name, L"UnityWndClass") == 0;
+	}
+
+	void CaptureChain(HWND window, IUnknown* device, IDXGISwapChain* chain)
+	{
+		ComPtr<ID3D11Device> d11;
+		// The AMD provider also creates a chain for this HWND, using a D3D12 queue.
+		if (UnityWindow(window) && device && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&d11)))) {
 			g_window = window;
 			HookChain(chain);
 		}
 	}
 
+	bool TryNative(IDXGIFactory2* factory, IUnknown* device, HWND window, const DXGI_SWAP_CHAIN_DESC1& desc,
+		const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, IDXGISwapChain1** chain)
+	{
+		if (!g_tryNative || !device || !chain || !UnityWindow(window)) return false;
+		ComPtr<ID3D11Device> d11;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&d11)))) return false;
+		const HRESULT hr = CreateNativeD3D11Proxy(factory, d11.Get(), window, desc, fullscreen, chain);
+		if (FAILED(hr)) {
+			BridgeLog("AMD native SwapChain unavailable (0x%08x, format %u, swap effect %u); keeping manual FG.",
+				static_cast<unsigned>(hr), desc.Format, desc.SwapEffect);
+			return false;
+		}
+		g_window = window;
+		return true;
+	}
+
 	HRESULT STDMETHODCALLTYPE CreateHook(IDXGIFactory* factory, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc,
 		IDXGISwapChain** chain)
 	{
+		if (g_tryNative && desc && chain && UnityWindow(desc->OutputWindow)) {
+			ComPtr<IDXGIFactory2> factory2;
+			if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory2)))) {
+				DXGI_SWAP_CHAIN_DESC1 translated = {};
+				translated.Width = desc->BufferDesc.Width;
+				translated.Height = desc->BufferDesc.Height;
+				translated.Format = desc->BufferDesc.Format;
+				translated.SampleDesc = desc->SampleDesc;
+				translated.BufferUsage = desc->BufferUsage;
+				translated.BufferCount = desc->BufferCount;
+				translated.SwapEffect = desc->SwapEffect;
+				translated.Flags = desc->Flags;
+				DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen = {desc->BufferDesc.RefreshRate,
+					desc->BufferDesc.ScanlineOrdering, desc->BufferDesc.Scaling, desc->Windowed};
+				IDXGISwapChain1* native = nullptr;
+				if (TryNative(factory2.Get(), device, desc->OutputWindow, translated, &fullscreen, &native)) {
+					*chain = native;
+					return S_OK;
+				}
+			}
+		}
 		const HRESULT hr = g_create(factory, device, desc, chain);
-		if (SUCCEEDED(hr) && desc && chain && *chain) CaptureChain(desc->OutputWindow, *chain);
+		if (SUCCEEDED(hr) && desc && chain && *chain) CaptureChain(desc->OutputWindow, device, *chain);
 		return hr;
 	}
 
@@ -144,8 +190,9 @@ namespace
 		const DXGI_SWAP_CHAIN_DESC1* desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen,
 		IDXGIOutput* output, IDXGISwapChain1** chain)
 	{
+		if (desc && !output && TryNative(factory, device, window, *desc, fullscreen, chain)) return S_OK;
 		const HRESULT hr = g_createForHwnd(factory, device, window, desc, fullscreen, output, chain);
-		if (SUCCEEDED(hr) && chain && *chain) CaptureChain(window, *chain);
+		if (SUCCEEDED(hr) && chain && *chain) CaptureChain(window, device, *chain);
 		return hr;
 	}
 
@@ -192,7 +239,7 @@ namespace
 	}
 }
 
-bool CaptureGameSwapChain(const GakuHookService& hooks)
+bool CaptureGameSwapChain(const GakuHookService& hooks, bool nativeSwapchain)
 {
 	ComPtr<IDXGIFactory2> factory;
 	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -202,6 +249,7 @@ bool CaptureGameSwapChain(const GakuHookService& hooks)
 		{vtable[15], reinterpret_cast<void*>(&CreateForHwndHook), reinterpret_cast<void**>(&g_createForHwnd)}
 	};
 	g_capture = hooks.acquireBatch(hooks.context, _countof(requests), requests) == GAKU_OK;
+	g_tryNative = g_capture && nativeSwapchain;
 	return g_capture;
 }
 

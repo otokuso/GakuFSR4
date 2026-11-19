@@ -43,6 +43,8 @@ FSR 4.xのプロバイダーが複数ある場合は、利用可能な中でバ�
 
 フレーム生成は既定で無効です。`FrameGeneration=1` で有効になり、ゲームログの `FSR Frame Generation active` に実際に使ったバージョンが出ます。4.0.2にはWindows 11とRadeon RX 9000シリーズ以降が必要です。縦画面と横画面のSDR表示で、補間フレームを挟める表示間隔があるときに動作します。中央に表示される映像に黒帯が付く場合は、映像部分を補間して黒帯やその上のUIを実フレームから残します。映像部分のUIも補間の対象になります。ウィンドウが小さいときは、カメラの描画解像度を下限に補間の処理解像度を抑えます。
 
+AMD 公式 SwapChain の試験経路は `FrameGeneration=1` と `NativeSwapChain=1` を設定して再起動すると使えます。起動時に対応できない SwapChain は手動 FG に戻ります。動作中に問題が起きた場合は `NativeSwapChain=0` に戻して再起動してください。DAFP の条件と実機での確認状況は [AMD SwapChain 検証](docs/NATIVE_FG_SWAPCHAIN.md) を参照してください。
+
 画面の映像領域が中央以外にある場合の実験用に、`FGViewportX`、`FGViewportY`、`FGViewportW`、`FGViewportH` でバックバッファ内の領域をピクセル単位で指定できます。指定した矩形がバックバッファ外またはシーンのアスペクト比と合わなければFGをスキップします。未指定時は従来の中央アスペクトフィットを使います。実Viewportの自動検出は未実装です。
 
 RX 9070 XTで、ゲーム内の縦画面に対してFSR 4.1.2とFSR Frame Generation 4.0.2の動作を確認しました。
