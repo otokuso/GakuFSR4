@@ -10,6 +10,7 @@
 
 extern "C" void FSR4_GetStats(Stats* out);
 extern "C" const char* FSR4_GetLastFgSkipReason();
+extern "C" bool FSR4_UsesNativeSwapchain();
 
 namespace gakufsr {
 namespace {
@@ -94,12 +95,18 @@ void DrawSettings(void*) {
             ImGui::Text("Frames: %llu, backend failures: %u",(unsigned long long)s.frames,s.failures);
             ImGui::Separator();
             ImGui::Text("FG provider: %s",s.fgProvider[0]?s.fgProvider:"not active / unavailable");
-            ImGui::Text("FG GPU: %.2f ms (smoothed), VRAM: %.1f MiB",s.fgGpuMs,s.fgMemory/1048576.0);
+            if(s.fgGpuMs>0)
+                ImGui::Text("FG GPU: %.2f ms (smoothed), VRAM: %.1f MiB",s.fgGpuMs,s.fgMemory/1048576.0);
+            else
+                ImGui::Text("FG GPU: --, VRAM: %.1f MiB",s.fgMemory/1048576.0);
             ImGui::Text("FG prepared: %llu, generated: %llu, real Presents: %llu",
                 (unsigned long long)s.fgPrepared,(unsigned long long)s.fgGenerated,(unsigned long long)s.fgReal);
             ImGui::Text("FG skipped: %llu, interval too short: %llu",
                 (unsigned long long)s.fgSkipped,(unsigned long long)s.fgNotNeeded);
-            ImGui::Text("FG interval: %.2f ms, pacing: %.2f ms",s.fgIntervalMs,s.fgPaceMs);
+            if(s.fgIntervalMs>0) ImGui::Text("FG source interval: %.2f ms",s.fgIntervalMs);
+            else ImGui::TextUnformatted("FG source interval: --");
+            if(FSR4_UsesNativeSwapchain()) ImGui::TextUnformatted("FG pacing: AMD SwapChain");
+            else if(s.fgPaceMs>0) ImGui::Text("FG manual pacing wait: %.2f ms",s.fgPaceMs);
             ImGui::Text("FG last dispatch result: %d",s.fgLastResult);
         }
         if(lastFgSkip) ImGui::TextWrapped("Last FG skip: %s",lastFgSkip);

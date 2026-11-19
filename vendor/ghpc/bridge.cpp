@@ -14,6 +14,7 @@
 #include <set>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 #include "../../src/FgDistortionMath.h"
 
@@ -244,12 +245,18 @@ namespace
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+	std::atomic<bool> g_nativeSwapchainActive{false};
 	struct NativePresentState {
 		IDXGISwapChain4* chain = nullptr;
 		ffxContext swapchainContext = nullptr;
 		ComPtr<ID3D12CommandAllocator> allocator;
 		ComPtr<ID3D12GraphicsCommandList> list;
 		uint64_t fence = 0;
+		uint64_t timingFence = 0;
+		bool timingRequested = false;
+		bool timingRecorded = false;
+		bool timingValid = false;
+		bool timingDisabled = false;
 		std::atomic<uint64_t> generated{0};
 		std::atomic<ffxReturnCode_t> error{FFX_API_RETURN_OK};
 		bool enabled = false;
@@ -422,6 +429,8 @@ namespace
 		g.distortionAttempted = g.distortionDisabled = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
+		g.stats.fgIntervalMs = g.stats.fgPaceMs = g.stats.fgGpuMs = 0;
+		nativePresent.timingValid = false;
 		g.fgPaceSamples = 0;
 		g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		g.stats.fgProviderId = 0;
@@ -535,13 +544,13 @@ namespace
 
 		D3D12_QUERY_HEAP_DESC qh = {};
 		qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-		qh.Count = 2 * Slots;
+		qh.Count = 2 * (Slots + 1);
 		if (!Check(g.d12->CreateQueryHeap(&qh, IID_PPV_ARGS(&g.timestamps)), "CreateQueryHeap")) return false;
 		D3D12_HEAP_PROPERTIES hp = {};
 		hp.Type = D3D12_HEAP_TYPE_READBACK;
 		D3D12_RESOURCE_DESC bd = {};
 		bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bd.Width = 2 * Slots * sizeof(uint64_t);
+		bd.Width = 2 * (Slots + 1) * sizeof(uint64_t);
 		bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
 		bd.SampleDesc.Count = 1;
 		bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -865,18 +874,38 @@ void main(uint3 id : SV_DispatchThreadID)
 		g.failed = true;
 	}
 
+	double ReadGpuTime(int slot)
+	{
+		D3D12_RANGE r = { slot * 2 * sizeof(uint64_t), (slot * 2 + 2) * sizeof(uint64_t) };
+		void* p = nullptr;
+		if (FAILED(g.readback->Map(0, &r, &p))) return 0;
+		const uint64_t* t = (const uint64_t*)((const char*)p + r.Begin);
+		const double elapsed = t[1] > t[0] ? (t[1] - t[0]) * g.tickMs : 0;
+		D3D12_RANGE none = { 0, 0 };
+		g.readback->Unmap(0, &none);
+		return elapsed;
+	}
+
 	void ReadTimestamps(int slot)
 	{
 		if (!g.slotTimed[slot]) return;
 		g.slotTimed[slot] = false;
-		D3D12_RANGE r = { slot * 2 * sizeof(uint64_t), (slot * 2 + 2) * sizeof(uint64_t) };
-		void* p = nullptr;
-		if (FAILED(g.readback->Map(0, &r, &p))) return;
-		const uint64_t* t = (const uint64_t*)((const char*)p + r.Begin);
-		if (t[1] > t[0]) Average(g.slotFg[slot] ? g.stats.fgGpuMs : g.stats.gpuMs, (t[1] - t[0]) * g.tickMs);
+		const auto elapsed = ReadGpuTime(slot);
+		if (elapsed > 0) Average(g.slotFg[slot] ? g.stats.fgGpuMs : g.stats.gpuMs, elapsed);
 		g.slotFg[slot] = false;
-		D3D12_RANGE none = { 0, 0 };
-		g.readback->Unmap(0, &none);
+	}
+
+	void ObserveFgInterval(LONGLONG entry, LONGLONG frequency)
+	{
+		if (g.fgLastEntry) {
+			const auto ticks = entry - g.fgLastEntry;
+			if (ticks > 0 && ticks < frequency) {
+				const double delta = static_cast<double>(ticks);
+				g.fgIntervalTicks = g.fgIntervalTicks == 0 ? delta : g.fgIntervalTicks + (delta - g.fgIntervalTicks) / 8.0;
+			} else g.fgIntervalTicks = 0;
+		}
+		g.fgLastEntry = entry;
+		g.stats.fgIntervalMs = static_cast<float>(g.fgIntervalTicks * 1000.0 / frequency);
 	}
 
 	bool EnsureExposure(ID3D12GraphicsCommandList* l, int slot, float value)
@@ -1125,7 +1154,17 @@ void main(uint3 id : SV_DispatchThreadID)
 
 	ffxReturnCode_t NativeInterpolate(ffxDispatchDescFrameGeneration* params, void*)
 	{
+		auto* list = static_cast<ID3D12GraphicsCommandList*>(params->commandList);
+		const bool timed = list && std::exchange(nativePresent.timingRequested, false);
+		if (timed) list->EndQuery(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, Slots * 2);
 		const auto result = g.fx.Dispatch(&g.fg, &params->header);
+		if (timed) {
+			list->EndQuery(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, Slots * 2 + 1);
+			list->ResolveQueryData(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, Slots * 2, 2,
+				g.readback.Get(), Slots * 2 * sizeof(uint64_t));
+			nativePresent.timingRecorded = true;
+			nativePresent.timingValid = result == FFX_API_RETURN_OK && params->numGeneratedFrames;
+		}
 		if (result == FFX_API_RETURN_OK) nativePresent.generated += params->numGeneratedFrames;
 		else nativePresent.error = result;
 		return result;
@@ -1155,6 +1194,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			c.swapChain = nativePresent.chain;
 			c.flags = 0;
 			c.frameGenerationCallback = NativeInterpolate;
+			c.allowAsyncWorkloads = false; // The timestamp fence is on the game graphics queue.
 			const auto rect = g.fgContent;
 			c.generationRect = { (int32_t)rect.x, (int32_t)rect.y, (int32_t)rect.width, (int32_t)rect.height };
 		}
@@ -1489,9 +1529,12 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 	nativePresent.allocator = std::move(allocator);
 	nativePresent.list = std::move(list);
 	nativePresent.fence = 0;
+	nativePresent.timingFence = 0;
+	nativePresent.timingRequested = nativePresent.timingRecorded = nativePresent.timingValid = nativePresent.timingDisabled = false;
 	nativePresent.generated = 0;
 	nativePresent.error = FFX_API_RETURN_OK;
 	nativePresent.enabled = false;
+	g_nativeSwapchainActive = true;
 	multithread->SetMultithreadProtected(TRUE);
 	ffxQueryGetProviderVersion provider = {};
 	provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
@@ -1509,6 +1552,7 @@ void DestroyNativeSwapchain(NativeSwapchainState& state)
 		WaitIdle("native swap-chain shutdown", true);
 		DestroyFg();
 		nativePresent.chain = nullptr;
+		g_nativeSwapchainActive = false;
 		nativePresent.swapchainContext = nullptr;
 		nativePresent.list.Reset();
 		nativePresent.allocator.Reset();
@@ -1578,12 +1622,42 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	if (SUCCEEDED(hr)) hr = g.ctx->Wait(g.out11.Get(), done);
 	if (FAILED(hr)) return hr;
 	nativePresent.fence = done;
+	const auto completed = nativePresent.timingFence ? g.out12->GetCompletedValue() : 0;
+	if (nativePresent.timingFence && completed != UINT64_MAX && completed >= nativePresent.timingFence) {
+		const auto elapsed = nativePresent.timingValid ? ReadGpuTime(Slots) : 0;
+		if (elapsed > 0) {
+			Average(g.stats.fgGpuMs, elapsed);
+			static bool reported = false;
+			if (!reported && g.stats.fgIntervalMs > 0) {
+				reported = true;
+				Log("AMD SwapChain FG timing: GPU %.2f ms, source interval %.2f ms.",
+					g.stats.fgGpuMs, g.stats.fgIntervalMs);
+			}
+		}
+		nativePresent.timingFence = 0;
+	}
+	nativePresent.timingRequested = nativePresent.enabled && !nativePresent.timingDisabled &&
+		!nativePresent.timingFence && g.stats.presented % 30 == 0;
+	nativePresent.timingRecorded = false;
+	LARGE_INTEGER entry, frequency;
+	QueryPerformanceCounter(&entry);
+	QueryPerformanceFrequency(&frequency);
 	hr = present();
+	if (nativePresent.timingRecorded) {
+		const auto timingDone = ++g.outValue;
+		if (SUCCEEDED(g.queue->Signal(g.out12.Get(), timingDone))) nativePresent.timingFence = timingDone;
+		else nativePresent.timingDisabled = true;
+	}
 	const auto frames = nativePresent.generated.exchange(0);
 	if (SUCCEEDED(hr)) {
-		if (hr == S_OK) CountPresentFrames(1, frames);
+		if (hr == S_OK) {
+			CountPresentFrames(1, frames);
+			if (nativePresent.enabled) ObserveFgInterval(entry.QuadPart, frequency.QuadPart);
+		}
 		const auto failure = nativePresent.error.exchange(FFX_API_RETURN_OK);
+		if (frames || failure != FFX_API_RETURN_OK) g.stats.fgLastResult = static_cast<int32_t>(failure);
 		if (failure != FFX_API_RETURN_OK) FgFailure(3, "native SwapChain callback", failure, g.fgFrameId);
+		else if (frames) FgRecovered();
 		if (frames) {
 			if (g.stats.fgGenerated == 0) Log("First AMD SwapChain interpolation: SyncInterval=%u, flags=0x%x.", sync, flags);
 			g.stats.fgGenerated += frames;
@@ -1714,13 +1788,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	LARGE_INTEGER entry, qf;
 	QueryPerformanceCounter(&entry);
 	QueryPerformanceFrequency(&qf);
-	if (g.fgLastEntry)
-	{
-		double dt = (double)(entry.QuadPart - g.fgLastEntry);
-		if (dt > 0 && dt < qf.QuadPart) g.fgIntervalTicks = g.fgIntervalTicks == 0 ? dt : g.fgIntervalTicks + (dt - g.fgIntervalTicks) / 8.0;
-	}
-	g.fgLastEntry = entry.QuadPart;
-	g.stats.fgIntervalMs = (float)(g.fgIntervalTicks * 1000.0 / qf.QuadPart);
+	ObserveFgInterval(entry.QuadPart, qf.QuadPart);
 	if (g.fgRefreshFrames++ % 600 == 0)
 	{
 		MONITORINFOEXW mi = {};
@@ -1969,6 +2037,7 @@ EXPORT int FSR4_PollLog(char* buf, int cap)
 }
 
 EXPORT const char* FSR4_GetLastFgSkipReason() { return g_fgSkipReason.load(); }
+extern "C" bool FSR4_UsesNativeSwapchain() { return g_nativeSwapchainActive.load(); }
 
 EXPORT void FSR4_GetStats(Stats* out)
 {
