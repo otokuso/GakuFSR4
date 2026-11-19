@@ -548,10 +548,10 @@ void Bind() {
     method.transform=api.Method(api.Class("UnityEngine","Component"),"get_transform",{});
     auto transform=api.Class("UnityEngine","Transform");
     method.position=api.Method(transform,"get_position",{});
+    method.forward=api.Method(transform,"get_forward",{});
     if(frameGeneration) {
         method.up=api.Method(transform,"get_up",{});
         method.right=api.Method(transform,"get_right",{});
-        method.forward=api.Method(transform,"get_forward",{});
     }
     method.frame=api.Method(api.Class("UnityEngine","Time"),"get_frameCount",{});
     method.time=api.Method(api.Class("UnityEngine","Time"),"get_unscaledDeltaTime",{});
