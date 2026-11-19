@@ -27,7 +27,7 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool attempted=false;
 bool frameGeneration=false;
-bool fsrJitterCycle=false;
+int jitterPhaseMode=0;
 int motionVectorYSign=-1;
 int jitterXSign=-1,jitterYSign=-1;
 bool nativeAaBeforePost=false;
@@ -280,9 +280,29 @@ struct History {
     float fov=0,pos[3]{},forward[3]{};
 } history;
 std::atomic<uint64_t> completed{0};
+std::atomic<uint64_t> nativeEarlyQueued{0},nativeFinalQueued{0},nativeOffscreenQueued{0},nativeResetsQueued{0};
+std::atomic<float> nativeLastJitterX{0},nativeLastJitterY{0};
+std::atomic<bool> nativeLastInputHdr{false};
+std::atomic<bool> nativeHistoryResetRequested{false};
 int configuredFrame=-1;
 std::vector<int> configuredCameras;
 PrimaryCamera primaryCamera;
+
+NativeAaDiagnostics ReadNativeAaDiagnostics() {
+    NativeAaDiagnostics info{};
+    info.selected=enabled && ratio==1.0f;
+    info.beforePost=nativeAaBeforePost;
+    info.jitterPhases=SelectJitterPhaseCount(jitterPhaseMode,ratio);
+    info.beforePostQueued=nativeEarlyQueued.load();
+    info.finalQueued=nativeFinalQueued.load();
+    info.offscreenQueued=nativeOffscreenQueued.load();
+    info.resetsQueued=nativeResetsQueued.load();
+    info.lastJitterX=nativeLastJitterX.load();
+    info.lastJitterY=nativeLastJitterY.load();
+    info.inputHdr=nativeLastInputHdr.load();
+    return info;
+}
+void RequestNativeAaHistoryReset() { nativeHistoryResetRequested.store(true); }
 
 void BlitCamera(P cmd,P src,P dst) {
     float mip=0; bool bilinear=false;
@@ -360,7 +380,7 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         auto taa=static_cast<char*>(cd)+field.taaSettings;
         const auto jitter=RepairTaaJitter(oldJitterX,oldJitterY,oldW,oldH,w,h,frame,
             At<int>(taa,field.taaOffset),At<float>(taa,field.taaJitter),
-            fsrJitterCycle?FsrRecommendedJitterPhases(ratio):1024);
+            SelectJitterPhaseCount(jitterPhaseMode,ratio));
         matrix[12]=jitter.x;matrix[13]=jitter.y;
         static bool reported=false;
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
@@ -416,6 +436,16 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         if((offscreen || earlyNativeAA) && ratio==1.0f) {
             if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
                 capture.frame=-1;
+                originalTaa(cmd,material,cd,src,dst,motion,mi);
+                return;
+            }
+            auto sourceTex=At<P>(src,field.rt),destinationTex=At<P>(dst,field.rt);
+            if(!frame_math::NativeSurfaceDimensions(
+                api.Value<int>(method.width,sourceTex),api.Value<int>(method.height,sourceTex),
+                api.Value<int>(method.width,destinationTex),api.Value<int>(method.height,destinationTex),w,h)) {
+                capture.frame=-1;
+                static bool warned=false;
+                if(!warned) { warned=true; Log("Native AA TAA RTHandle dimensions differ from the camera descriptor; using game TAA",GAKU_LOG_WARNING); }
                 originalTaa(cmd,material,cd,src,dst,motion,mi);
                 return;
             }
@@ -501,6 +531,8 @@ void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool befor
         history.w!=w||history.h!=h||frame_math::RotationJump(forward.data(),history.forward);
     auto taa=static_cast<char*>(cd)+field.taaSettings;
     fd.reset|=At<int>(taa,field.reset)>0;
+    const bool manualHistoryReset=ratio==1.0f && nativeHistoryResetRequested.exchange(false);
+    if(manualHistoryReset) fd.reset=true;
     if(frameGeneration) {
         fd.fg=1;
         std::copy(pos.begin(),pos.end(),fd.camPos);
@@ -510,17 +542,35 @@ void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool befor
             std::copy(axis.begin(),axis.end(),dst);
         }
     }
-    if(!renderWork.Attach(use.id,std::move(packet))) return;
+    // A plugin event may consume/destroy the packet as soon as it is queued.
+    // Keep diagnostics independent of its lifetime.
+    const bool queuedReset=fd.reset!=0;
+    const float queuedJitterX=fd.jitterX,queuedJitterY=fd.jitterY;
+    const bool queuedHdr=(fd.createFlags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE)!=0;
+    if(!renderWork.Attach(use.id,std::move(packet))) {
+        if(manualHistoryReset) nativeHistoryResetRequested.store(true);
+        return;
+    }
     try {
         QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
             reinterpret_cast<P>(&RenderEvent),1,reinterpret_cast<P>(use.id));
     } catch(...) {
         renderWork.Take(use.id);
+        if(manualHistoryReset) nativeHistoryResetRequested.store(true);
         throw;
     }
     history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
     std::copy(pos.begin(),pos.end(),history.pos);
     std::copy(forward.begin(),forward.end(),history.forward);
+    if(ratio==1.0f) {
+        if(beforePost) ++nativeEarlyQueued;
+        else if(At<P>(cd,field.target)) ++nativeOffscreenQueued;
+        else ++nativeFinalQueued;
+        if(queuedReset) ++nativeResetsQueued;
+        nativeLastJitterX.store(queuedJitterX);
+        nativeLastJitterY.store(queuedJitterY);
+        nativeLastInputHdr.store(queuedHdr);
+    }
 }
 
 void Final(P self,P cmd,P rd,M mi) {
@@ -741,10 +791,11 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     }
     if(jitterXSign!= -1||jitterYSign!=-1)
         Log("Experimental FSR jitter sign override enabled; compare against default -1/-1",GAKU_LOG_WARNING);
-    const auto cycleMode=GetPrivateProfileIntW(L"FSR4",L"JitterPhaseMode",0,config.c_str());
-    fsrJitterCycle=cycleMode==1;
-    if(cycleMode>1) Log("Invalid JitterPhaseMode; using the normal Unity jitter cycle",GAKU_LOG_WARNING);
-    if(fsrJitterCycle) Log("Experimental FSR jitter phase cycle enabled",GAKU_LOG_WARNING);
+    jitterPhaseMode=GetPrivateProfileIntW(L"FSR4",L"JitterPhaseMode",0,config.c_str());
+    if(jitterPhaseMode<0 || jitterPhaseMode>2) {
+        Log("Invalid JitterPhaseMode; using the normal Unity jitter cycle",GAKU_LOG_WARNING);
+        jitterPhaseMode=0;
+    }
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     const bool configEarlyNativeAA=GetPrivateProfileIntW(L"FSR4",L"NativeAABeforePost",0,config.c_str())!=0;
@@ -764,7 +815,8 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     GetPrivateProfileStringW(L"FSR4",L"Sharpness",L"0.2",value,64,config.c_str());
     sharpness=wcstof(value,&end);
     if(!end||end==value||*end||!std::isfinite(sharpness)||sharpness<0||sharpness>1) return GAKU_E_INVALID_ARGUMENT;
-    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness,configFg);
+    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness,configFg,
+        configEarlyNativeAA,jitterPhaseMode);
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
@@ -804,6 +856,9 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     nativeAaBeforePost=configEarlyNativeAA && ratio==1.0f;
     if(configEarlyNativeAA && !nativeAaBeforePost)
         Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the normal FSR path",GAKU_LOG_WARNING);
+    if(ratio==1.0f)
+        Log(std::string("Native AA route: ")+(nativeAaBeforePost?"screen TAA pass (experimental)":"screen final pass")+
+            "; jitter sequence "+std::to_string(SelectJitterPhaseCount(jitterPhaseMode,ratio))+" phases");
     const bool nativeSwapchain=GetPrivateProfileIntW(L"FSR4",L"NativeSwapChain",0,config.c_str())==1;
     if(!CaptureGameSwapChain(hooks,frameGeneration&&nativeSwapchain))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);

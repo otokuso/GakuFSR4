@@ -26,6 +26,13 @@ constexpr bool EarlyNativeAA(bool requested, bool offscreen, float ratio) {
     return requested && !offscreen && ratio==1.0f;
 }
 
+// Never hide a scaled input/output behind a 1:1 NativeAA preset. The TAA
+// RTHandles are expected to be real, fixed-size render textures in this path.
+constexpr bool NativeSurfaceDimensions(int srcW,int srcH,int dstW,int dstH,int expectedW,int expectedH) {
+    return expectedW>0 && expectedH>0 && srcW==expectedW && srcH==expectedH &&
+        dstW==expectedW && dstH==expectedH;
+}
+
 constexpr bool FsrInputIsHdr(bool cameraHdr, bool offscreen, bool beforePost) {
     return cameraHdr && (offscreen || beforePost);
 }

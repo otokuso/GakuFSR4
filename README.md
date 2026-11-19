@@ -96,9 +96,10 @@ F1メニューのGakuFSR4パネルでは、次の操作ができます。
 | `Preset` | 内部描画解像度のプリセット |
 | `Sharpness` | シャープネス（0～100%） |
 | `Frame Generation (2x)` | FGを有効にする（対応シーンのみ） |
+| `Native AA / jitter (experimental)` | Native AAの実行位置とジッター周期を変更。初期値は従来どおり |
 | `Save settings` | `gakufsr4.ini` へ設定を保存 |
 
-**保存した設定は、ゲームの次回起動時に反映されます。** F1画面から変更できない実験設定はINIを直接編集してください。
+**保存した設定は、ゲームの次回起動時に反映されます。** Native AAの履歴を手動リセットするボタンだけは、実行中に次のFSRフレームへ反映されます。その他の実験設定はINIを直接編集してください。
 
 ### 画質プリセット
 
@@ -122,6 +123,8 @@ Enabled=1
 Preset=Quality
 Sharpness=0.2
 FrameGeneration=0
+NativeAABeforePost=0
+JitterPhaseMode=0
 NativeSwapChain=0
 ```
 
@@ -129,10 +132,14 @@ NativeSwapChain=0
 - `Sharpness` は `0.0`～`1.0` で指定します（UIでは0～100%）。
 - `FrameGeneration=1` でFGを試します。初期値は `0` です。
 - `NativeSwapChain=1` は**実験的なAMD公式SwapChain方式**を有効にします。`FrameGeneration=1` も必要です。
+- `NativeAABeforePost=1` はNative AAの画面カメラのみ、FSRをUnityのTAA位置へ移します。オフスクリーンカメラは既存の経路を利用します。画質が必ず向上する設定ではありません。
+- `JitterPhaseMode=0` はUnityの1024周期（従来どおり）、`1` はFSR推奨周期（Native AAでは8）、`2` はNative AAだけFSR推奨周期を使用します。いずれも検証用です。
 - `ProviderVersion=4.1.2` のように指定すると、使うFSR 4.xプロバイダーのバージョンを固定できます。指定版が見つからない場合はFSRを開始しません。省略時は利用可能な4.xのうち最新のバージョンを選びます。**FSR 3への自動切り替えはありません。**
 - 旧設定 `Ratio` は `Preset` が未指定の場合だけ使われます。不明なプリセット名は `Quality` として扱われます。
 
 ジッターやモーションベクトルの符号、NativeAAの処理位置、FGの表示領域・歪み補正といった追加オプションは検証用です。根拠なく変更すると残像や表示崩れにつながります。詳しくは[技術資料](#技術資料と開発)を参照してください。
+
+Native AAの画質を検証するときは、まずFGを無効にし、シャープネスを0に設定して処理位置とジッター周期を1項目ずつ比較してください。F1パネルのRuntime diagnosticsでは、使用中の処理位置、周期、最後のジッター値、FSR入力のHDRフラグ、キュー投入数と履歴リセット数を確認できます。詳細な比較手順は[Native AA検証ガイド](docs/NATIVE_AA_VALIDATION.md)にあります。
 
 ## Frame Generationの注意点
 
@@ -218,6 +225,7 @@ python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv m
 | [FG_UI_COMPOSITION.md](docs/FG_UI_COMPOSITION.md) | UI分離・合成に関する現状と未実装部分 |
 | [FG_DISTORTION.md](docs/FG_DISTORTION.md) | FG用の実験的な歪みフィールド |
 | [FSR_BEFORE_POST.md](docs/FSR_BEFORE_POST.md) | NativeAAをポストプロセス前に配置する実験設定 |
+| [NATIVE_AA_VALIDATION.md](docs/NATIVE_AA_VALIDATION.md) | Native AAの処理位置・ジッター・HDR・モーションベクトルの検証方法 |
 | [MIP_BIAS.md](docs/MIP_BIAS.md) | テクスチャMipバイアスの調査 |
 
 Windows CIはDebug/ReleaseのビルドとCPU側テストを実行します。ゲーム内GPU動作の検証は別途必要です。手動GPUテストのコマンドは[GPU_TESTING.md](docs/GPU_TESTING.md)にあります。

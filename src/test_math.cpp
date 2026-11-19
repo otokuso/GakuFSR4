@@ -298,9 +298,19 @@ int main() {
     camera.Reset();
     assert(camera.Allow(11,14));
     assert(FsrRecommendedJitterPhases(1.5f)==18);
+    assert(FsrRecommendedJitterPhases(1.0f)==8);
     assert(FsrRecommendedJitterPhases(1.7f)==23);
     assert(FsrRecommendedJitterPhases(2.0f)==32);
     assert(FsrRecommendedJitterPhases(3.0f)==72);
+    assert(SelectJitterPhaseCount(0,1.0f)==1024);
+    assert(SelectJitterPhaseCount(1,1.0f)==8);
+    assert(SelectJitterPhaseCount(2,1.0f)==8);
+    assert(SelectJitterPhaseCount(2,1.5f)==1024);
+    assert(SelectJitterPhaseCount(1,1.5f)==18);
+    assert(SelectJitterPhaseCount(3,1.0f)==1024);
+    auto nativePhaseA=RepairTaaJitter(0,0,1920,1080,1920,1080,2,0,1,8);
+    auto nativePhaseB=RepairTaaJitter(0,0,1920,1080,1920,1080,10,0,1,8);
+    assert(nativePhaseA.x==nativePhaseB.x && nativePhaseA.y==nativePhaseB.y);
     auto phaseA=RepairTaaJitter(1,1,1920,1080,1280,720,0,-1,1,18);
     auto phaseB=RepairTaaJitter(0,0,1920,1080,1280,720,18,-1,1,18);
     assert(phaseA.x==phaseB.x && phaseA.y==phaseB.y);
@@ -326,6 +336,10 @@ int main() {
     assert(frame_math::RenderSize(2160,1.5f)==1440);
     assert(frame_math::RenderSize(3840,1.5f)==2560);
     assert(frame_math::RenderSize(1,3)==1);
+    assert(frame_math::NativeSurfaceDimensions(1920,1080,1920,1080,1920,1080));
+    assert(!frame_math::NativeSurfaceDimensions(1920,1080,1920,1079,1920,1080));
+    assert(!frame_math::NativeSurfaceDimensions(2560,1440,1920,1080,1920,1080));
+    assert(!frame_math::NativeSurfaceDimensions(1920,1080,1920,1080,0,1080));
     bool rejected=false;
     try { frame_math::RenderSize(0,1.5f); } catch (...) { rejected=true; }
     assert(rejected);

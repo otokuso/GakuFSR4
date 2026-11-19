@@ -9,6 +9,15 @@ inline int FsrRecommendedJitterPhases(float ratio)
     return std::isfinite(ratio) && ratio>=1 && ratio<=3 ? static_cast<int>(std::round(8*ratio*ratio)) : 8;
 }
 
+// 0: preserve Unity's 1024-frame Halton sequence, 1: FSR's ratio-dependent
+// sequence, 2: use the FSR sequence for NativeAA only. The last option keeps
+// the existing upscaling behavior while making 1:1 AA easier to compare.
+inline int SelectJitterPhaseCount(int mode, float ratio)
+{
+    return mode == 1 || (mode == 2 && ratio == 1.0f)
+        ? FsrRecommendedJitterPhases(ratio) : 1024;
+}
+
 inline float TaaHalton(uint32_t index, uint32_t base)
 {
     float value = 0, fraction = 1;
