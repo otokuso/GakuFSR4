@@ -23,6 +23,7 @@
 #include "ffx_framegeneration.h"
 #include "../../src/BridgeStats.h"
 #include "../../src/FgErrorBurst.h"
+#include "../../src/FgRetry.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -208,6 +209,7 @@ namespace
 		uint32_t fgDisplayW = 0, fgDisplayH = 0, fgRenderW = 0, fgRenderH = 0, fgFlags = 0;
 		bool fgProvidersListed = false;
 		bool fgUnavailable = false;
+		FgRetry fgRetry;
 		ImageRect fgContent{};
 		UINT fgSceneW = 0, fgSceneH = 0;
 		Shared present, gen, fgColor, fgOutput;
@@ -451,6 +453,8 @@ namespace
 		g.providersListed = false;
 		g.overrideId = 0;
 		g.exposureRequired = false;
+		g.fgUnavailable = false;
+		g.fgRetry.NewDevice();
 		deviceLost = false;
 		Log("Bridge shut down (%s)%s.", why, idle ? "" : "; its GPU objects abandoned, the queue was not idle");
 	}
@@ -957,12 +961,20 @@ void main(uint3 id : SV_DispatchThreadID)
 		backend.header.pNext = &version.header;
 		ffxReturnCode_t rc = g.fx.CreateContext(&g.fg, &desc.header, nullptr);
 		if (rc != FFX_API_RETURN_OK) {
-			Log("FG ffxCreateContext failed: %u. Continuing with upscaling.", rc);
+			const bool unsupported = rc == FFX_API_RETURN_NO_PROVIDER ||
+				rc == FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE ||
+				rc == FFX_API_RETURN_ERROR_PARAMETER ||
+				rc == FFX_API_RETURN_PROVIDER_NO_SUPPORT_NEW_DESCTYPE;
+			const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), unsupported);
+			Log("FG ffxCreateContext failed: %u. %s Continuing with upscaling.", rc,
+				unsupported ? "Provider/configuration unsupported; off until the device changes." :
+				delay ? "Will retry after a cooldown." : "Retries exhausted until a resize/device change.");
 			g.fg = nullptr;
-			g.fgUnavailable = true;
+			g.fgUnavailable = unsupported;
 			CheckRemoved();
 			return false;
 		}
+		g.fgRetry.Recovered();
 		g.fgDisplayW = displayW; g.fgDisplayH = displayH; g.fgRenderW = keyW; g.fgRenderH = keyH; g.fgFlags = flags;
 		g.fgHavePrevious = false;
 		made = true;
@@ -991,6 +1003,7 @@ void main(uint3 id : SV_DispatchThreadID)
 
 	void FgPrepare(const FrameData& fd, ID3D12GraphicsCommandList* l, uint32_t keyW, uint32_t keyH)
 	{
+		g.fgRetry.ObserveScene(fd.displayW, fd.displayH, keyW, keyH);
 		if (!fd.fg || !g.fgDll || !PresentHooked() || g.fgUnavailable)
 		{
 			if (g.fg && WaitIdle("FG off")) DestroyFg();
@@ -998,6 +1011,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			if (!g.fgOffLogged) { g.fgOffLogged = true; Log("FG off."); }
 			return;
 		}
+		if (!g.fgRetry.Ready(GetTickCount64())) { g.fgPending = false; return; }
 		if (!EnsureFg(fd, keyW, keyH)) { g.fgPending = false; return; }
 		uint64_t id = ++g.fgFrameId;
 		ffxConfigureDescFrameGeneration c = {};
@@ -1283,11 +1297,13 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
 {
 	std::unique_lock<std::mutex> lock(g_renderLock, std::try_to_lock);
-	if (!lock || !g.fg || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
+	if (!lock || !g.fgDll || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
 	ComPtr<ID3D11Device> device;
 	if (FAILED(sc->GetDevice(IID_PPV_ARGS(&device))) || device.Get() != g.d11Base) return false;
 	DXGI_SWAP_CHAIN_DESC chain{};
 	if (FAILED(sc->GetDesc(&chain)) || !chain.OutputWindow || !IsPresentWindow(chain.OutputWindow)) return false;
+	g.fgRetry.ObserveBackbuffer(chain.BufferDesc.Width, chain.BufferDesc.Height);
+	if (!g.fg) return false;
 	if (!g.fgPending || sync > 4 || (flags & ~DXGI_PRESENT_ALLOW_TEARING) ||
 		(parameters && (parameters->DirtyRectsCount || parameters->pScrollRect || parameters->pScrollOffset)))
 	{
@@ -1374,7 +1390,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		ok = EnsureScale() &&
 			MakeShared(g.fgColor, g.fgDisplayW, g.fgDisplayH, DXGI_FORMAT_R8G8B8A8_UNORM, true, "scaled FG input", false, -1) &&
 			MakeShared(g.fgOutput, g.fgDisplayW, g.fgDisplayH, DXGI_FORMAT_R8G8B8A8_UNORM, true, "scaled FG output", false, -1);
-	if (!ok) { g.fgUnavailable = true; Log("FG disabled: could not allocate backbuffer resources."); return false; }
+	if (!ok) {
+		const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), false);
+		g.fgHavePrevious = false;
+		Log("FG backbuffer allocation failed; %s",
+			delay ? "retrying after a cooldown." : "retries exhausted until a resize/device change.");
+		return false;
+	}
+	g.fgRetry.Recovered();
 	const Shared& source = scaled ? g.fgColor : g.present;
 	const Shared& output = scaled ? g.fgOutput : g.gen;
 
