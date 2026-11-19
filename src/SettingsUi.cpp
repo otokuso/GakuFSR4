@@ -4,6 +4,7 @@
 #include <string>
 #include "imgui.h"
 #include "Preset.h"
+#include "TaaJitter.h"
 #include "BridgeStats.h"
 #include "PresentRate.h"
 #include "LiveTiming.h"
@@ -21,7 +22,7 @@ bool draftEnabled=true;
 bool draftFrameGeneration=false;
 int draftPreset=-1;
 int draftSharpness=20;
-int draftJitterPhaseMode=0;
+int draftJitterPhaseMode=DefaultJitterPhaseMode;
 const char* saveMessage=nullptr;
 Stats currentStats{};
 ULONGLONG lastStatsRead=0;
@@ -107,7 +108,7 @@ void DrawSettings(void*) {
     }
     ImGui::SliderInt("Sharpness",&draftSharpness,0,100,"%d%%",ImGuiSliderFlags_AlwaysClamp);
     if(ImGui::CollapsingHeader("Native AA / jitter (experimental)")) {
-        constexpr const char* phaseModes[]={"Unity Halton (1024)","FSR recommended (all presets)","FSR only for Native AA"};
+        constexpr const char* phaseModes[]={"Unity Halton (1024, legacy)","FSR recommended (all presets)","FSR only for Native AA (default)"};
         ImGui::Combo("Jitter phase mode",&draftJitterPhaseMode,phaseModes,3);
         ImGui::TextDisabled("Experimental. For Native AA the FSR phase count is 8; Unity's is 1024.");
     }

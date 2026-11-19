@@ -13,12 +13,13 @@ after changing an option.
 
 | Run | `JitterPhaseMode` | Meaning |
 | --- | --- | --- |
-| A (baseline) | `0` | Unity 1024-phase Halton |
-| B | `2` | FSR 8-phase Native AA jitter |
+| A (legacy) | `0` | Unity 1024-phase Halton |
+| B (new default) | `2` | FSR 8-phase Native AA jitter |
 
 `JitterPhaseMode=1` uses the FSR ratio-dependent sequence for **all** presets;
-mode `2` changes the sequence only at ratio 1.0. Both are opt-in. The actual
-jitter applied to a frame and the value handed to the SDK must agree; the UI
+mode `2` changes the sequence only at ratio 1.0. Mode `2` is now the default;
+an existing INI with an explicit `JitterPhaseMode=0` keeps the legacy behavior.
+The actual jitter applied to a frame and the value handed to the SDK must agree; the UI
 shows the *submitted* pixel offsets, not a GPU capture of camera projection.
 
 For each run, capture the same live-scene segment:
