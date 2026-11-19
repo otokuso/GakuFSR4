@@ -123,7 +123,6 @@ Enabled=1
 Preset=Quality
 Sharpness=0.2
 FrameGeneration=0
-NativeAABeforePost=0
 JitterPhaseMode=0
 NativeSwapChain=0
 ```
@@ -132,14 +131,14 @@ NativeSwapChain=0
 - `Sharpness` は `0.0`～`1.0` で指定します（UIでは0～100%）。
 - `FrameGeneration=1` でFGを試します。初期値は `0` です。
 - `NativeSwapChain=1` は**実験的なAMD公式SwapChain方式**を有効にします。`FrameGeneration=1` も必要です。
-- `NativeAABeforePost=1` はNative AAの画面カメラのみ、FSRをUnityのTAA位置へ移します。オフスクリーンカメラは既存の経路を利用します。画質が必ず向上する設定ではありません。
+- Native AAの画面カメラは、UnityのTAAパスでFSRを実行します。旧設定 `NativeAABeforePost` は無視されます。
 - `JitterPhaseMode=0` はUnityの1024周期（従来どおり）、`1` はFSR推奨周期（Native AAでは8）、`2` はNative AAだけFSR推奨周期を使用します。いずれも検証用です。
 - `ProviderVersion=4.1.2` のように指定すると、使うFSR 4.xプロバイダーのバージョンを固定できます。指定版が見つからない場合はFSRを開始しません。省略時は利用可能な4.xのうち最新のバージョンを選びます。**FSR 3への自動切り替えはありません。**
 - 旧設定 `Ratio` は `Preset` が未指定の場合だけ使われます。不明なプリセット名は `Quality` として扱われます。
 
-ジッターやモーションベクトルの符号、NativeAAの処理位置、FGの表示領域・歪み補正といった追加オプションは検証用です。根拠なく変更すると残像や表示崩れにつながります。詳しくは[技術資料](#技術資料と開発)を参照してください。
+ジッターやモーションベクトルの符号、FGの表示領域・歪み補正といった追加オプションは検証用です。根拠なく変更すると残像や表示崩れにつながります。詳しくは[技術資料](#技術資料と開発)を参照してください。
 
-Native AAの画質を検証するときは、まずFGを無効にし、シャープネスを0に設定して処理位置とジッター周期を1項目ずつ比較してください。F1パネルのRuntime diagnosticsでは、使用中の処理位置、周期、最後のジッター値、FSR入力のHDRフラグ、キュー投入数と履歴リセット数を確認できます。詳細な比較手順は[Native AA検証ガイド](docs/NATIVE_AA_VALIDATION.md)にあります。
+Native AAの画質を検証するときは、まずFGを無効にし、シャープネスを0に設定してジッター周期を比較してください。F1パネルのRuntime diagnosticsでは、処理位置、周期、最後のジッター値、FSR入力のHDRフラグ、キュー投入数と履歴リセット数を確認できます。詳細な比較手順は[Native AA検証ガイド](docs/NATIVE_AA_VALIDATION.md)にあります。
 
 ## Frame Generationの注意点
 

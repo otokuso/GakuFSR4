@@ -22,8 +22,8 @@ constexpr bool RetryCamera(int camera, int blockedCamera, int frame, int retryFr
 
 // The existing RTHandle pair has display dimensions only in NativeAA mode.
 // Earlier upscaling at ratio > 1 requires rebuilding URP's later post passes.
-constexpr bool EarlyNativeAA(bool requested, bool offscreen, float ratio) {
-    return requested && !offscreen && ratio==1.0f;
+constexpr bool EarlyNativeAA(bool offscreen, float ratio) {
+    return !offscreen && ratio==1.0f;
 }
 
 // Never hide a scaled input/output behind a 1:1 NativeAA preset. The TAA

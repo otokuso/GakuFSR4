@@ -19,7 +19,6 @@ GakuDesktopUiService desktop{};
 std::wstring configPath;
 bool draftEnabled=true;
 bool draftFrameGeneration=false;
-bool draftNativeAaBeforePost=false;
 int draftPreset=-1;
 int draftSharpness=20;
 int draftJitterPhaseMode=0;
@@ -37,19 +36,17 @@ bool Save() {
     };
     return (draftPreset<0 || write(L"Preset",FsrPresets[draftPreset].key)) &&
         write(L"Sharpness",sharpness) && write(L"FrameGeneration",draftFrameGeneration?L"1":L"0") &&
-        write(L"NativeAABeforePost",draftNativeAaBeforePost?L"1":L"0") &&
         write(L"JitterPhaseMode",draftJitterPhaseMode==2?L"2":draftJitterPhaseMode==1?L"1":L"0") &&
         write(L"Enabled",draftEnabled?L"1":L"0");
 }
 }
 
 void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,bool enabled,float ratio,float sharpness,
-    bool frameGeneration,bool nativeAaBeforePost,int jitterPhaseMode) {
+    bool frameGeneration,int jitterPhaseMode) {
     if(host->queryService(host->hostContext,GAKU_SERVICE_DESKTOP_UI,1,sizeof desktop,&desktop)!=GAKU_OK) return;
     configPath=path;
     draftEnabled=enabled;
     draftFrameGeneration=frameGeneration;
-    draftNativeAaBeforePost=nativeAaBeforePost;
     draftSharpness=static_cast<int>(std::lround(sharpness*100));
     draftJitterPhaseMode=jitterPhaseMode;
     draftPreset=-1;
@@ -110,9 +107,6 @@ void DrawSettings(void*) {
     }
     ImGui::SliderInt("Sharpness",&draftSharpness,0,100,"%d%%",ImGuiSliderFlags_AlwaysClamp);
     if(ImGui::CollapsingHeader("Native AA / jitter (experimental)")) {
-        ImGui::Checkbox("Native AA before post-processing",&draftNativeAaBeforePost);
-        ImGui::TextWrapped("Applies to the screen camera at Native AA (1.0x) only. "
-            "Offscreen cameras retain their TAA-pass route. Compare bloom, DOF and motion before keeping it enabled.");
         constexpr const char* phaseModes[]={"Unity Halton (1024)","FSR recommended (all presets)","FSR only for Native AA"};
         ImGui::Combo("Jitter phase mode",&draftJitterPhaseMode,phaseModes,3);
         ImGui::TextDisabled("Experimental. For Native AA the FSR phase count is 8; Unity's is 1024.");
@@ -124,7 +118,7 @@ void DrawSettings(void*) {
     if (ImGui::CollapsingHeader("Runtime diagnostics",ImGuiTreeNodeFlags_DefaultOpen)) {
         const auto aa=ReadNativeAaDiagnostics();
         if(aa.selected) {
-            ImGui::Text("Native AA stage: %s",aa.beforePost?"TAA pass (before most post effects)":"Final pass (after post effects)");
+            ImGui::TextUnformatted("Native AA stage: TAA pass (before bloom and tone mapping)");
             ImGui::Text("Jitter phases: %d",aa.jitterPhases);
             ImGui::Text("Native AA queued: early %llu / final %llu / offscreen %llu",
                 (unsigned long long)aa.beforePostQueued,(unsigned long long)aa.finalQueued,
