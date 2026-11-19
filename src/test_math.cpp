@@ -19,6 +19,9 @@ static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
     auto portraitOnLandscape = FgAspectFit(1920,1080,1080,1920);
+    assert(FgViewportWithinBackbuffer({400,100,1080,608},1920,1080,1920,1080));
+    assert(!FgViewportWithinBackbuffer({1900,100,1080,608},1920,1080,1920,1080));
+    assert(!FgViewportWithinBackbuffer({400,100,1080,608},1920,1080,1080,1920));
     assert(portraitOnLandscape.x==656 && portraitOnLandscape.y==0);
     assert(portraitOnLandscape.width==608 && portraitOnLandscape.height==1080);
     auto landscapeOnPortrait = FgAspectFit(1080,1920,1920,1080);
