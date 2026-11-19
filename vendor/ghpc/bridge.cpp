@@ -1167,12 +1167,29 @@ void main(uint3 id : SV_DispatchThreadID)
 		QueryPerformanceFrequency(&f);
 		LONGLONG until = from + (LONGLONG)(ms * f.QuadPart / 1000.0);
 		LONGLONG busyStart = 0;
+#if defined(GAKU_FG_TIMER_TEST)
+		// This path is serialized by g_renderLock. Recheck the QPC deadline after waking.
+		static const std::unique_ptr<void, decltype(&CloseHandle)> timer(
+			CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+				TIMER_MODIFY_STATE | SYNCHRONIZE), &CloseHandle);
+		bool timerAvailable = static_cast<bool>(timer);
+#endif
 		for (;;)
 		{
 			QueryPerformanceCounter(&now);
 			LONGLONG left = until - now.QuadPart;
 			if (left <= 0) break;
-			if (left * 1000.0 / f.QuadPart > 1.5) Sleep(1);
+			const double leftMs = left * 1000.0 / f.QuadPart;
+#if defined(GAKU_FG_TIMER_TEST)
+			if (timerAvailable && leftMs > 0.35) {
+				LARGE_INTEGER due{};
+				due.QuadPart = -(std::max)(1LL, static_cast<LONGLONG>((leftMs - 0.25) * 10000.0));
+				timerAvailable = SetWaitableTimer(timer.get(), &due, 0, nullptr, nullptr, FALSE) &&
+					WaitForSingleObject(timer.get(), 100) == WAIT_OBJECT_0;
+				continue;
+			}
+#endif
+			if (leftMs > 1.5) Sleep(1);
 			else {
 				if (!busyStart) busyStart = now.QuadPart;
 				YieldProcessor();

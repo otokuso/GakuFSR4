@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cmath>
 #include <stdexcept>
+#include <chrono>
+#include <thread>
 #include "TestHalfFloat.h"
 #include "BridgeStats.h"
 #include "FrameMath.h"
@@ -35,7 +37,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool fgResized=fgScaled||fgLetterbox||fgCross;
     const bool fgDistortion=argc==4&&wcscmp(argv[3],L"--fg-distortion")==0;
     const bool fgHudless=argc==4&&wcscmp(argv[3],L"--fg-hudless")==0;
-    const bool fg=fgHudless||fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
+    const bool pacing=argc==4&&wcscmp(argv[3],L"--fg-pacing")==0;
+    const bool fg=pacing||fgHudless||fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||fgCross||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
     if(argc==4&&!portrait&&!fg&&!dynamic) return 2;
     auto dll=LoadLibraryW(argv[1]);if(!dll) return 3;
@@ -108,13 +111,13 @@ int wmain(int argc,wchar_t** argv) {
             desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
             desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
-            if(fgLetterbox) desc.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            if(fgLetterbox || pacing) desc.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
             Check(factory->CreateSwapChainForHwnd(device.Get(),window,&desc,nullptr,nullptr,&swapChain));
             ShowWindow(window,SW_SHOWNOACTIVATE);
-            fd.fg=1;fd.frameTimeMs=50;
+            fd.fg=1;fd.frameTimeMs=pacing?16.667f:50.0f;
             fd.up[1]=fd.right[0]=fd.fwd[2]=1;
         }
-        const int frameCount=fg?5:dynamic?8:4;
+        const int frameCount=pacing?1500:fg?5:dynamic?8:4;
         ComPtr<ID3D11Texture2D> dynamicReadback;
         const float positions[][2]={{.22f,.25f},{.38f,.25f},{.38f,.48f},{.60f,.65f},
                                     {.60f,.40f},{.33f,.40f},{.33f,.21f},{.49f,.21f}};
@@ -131,7 +134,16 @@ int wmain(int argc,wchar_t** argv) {
             Check(device->CreateTexture2D(&desc,nullptr,&dynamicReadback));
         }
         UINT presentCalls[5]{};
+        using Clock=std::chrono::steady_clock;
+        const auto started=Clock::now();
+        FILETIME created{}, exited{}, kernelBefore{}, userBefore{};
+        if(pacing) GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernelBefore,&userBefore);
         for(int i=0;i<frameCount;++i) {
+            if(pacing) {
+                MSG message;
+                while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) DispatchMessageW(&message);
+                std::this_thread::sleep_until(started+std::chrono::microseconds(i*16667));
+            }
             fd.reset=i==0||(fg&&i==frameCount-1);
             int objectX=0,objectY=0;
             float light=1;
@@ -185,7 +197,7 @@ int wmain(int argc,wchar_t** argv) {
                 ctx->UpdateSubresource(color.Get(),0,nullptr,pixels.data(),w*8,0);
                 ctx->UpdateSubresource(motion.Get(),0,nullptr,mv.data(),w*4,0);
             }
-            printf("GPU test: dispatch %d\n",i);
+            if(!pacing) printf("GPU test: dispatch %d\n",i);
             if(fgHudless) fd.hudless=i%2==0 ? fd.output : nullptr;
             render(1,&fd);
             if(dynamic) {
@@ -226,17 +238,17 @@ int wmain(int argc,wchar_t** argv) {
             ComPtr<ID3D11RenderTargetView> target;
             Check(swapChain->GetBuffer(0,IID_PPV_ARGS(&backbuffer)));
             Check(device->CreateRenderTargetView(backbuffer.Get(),nullptr,&target));
-            const float rgba[]{0.2f+i*0.05f,0.3f,0.4f,1};
+            const float rgba[]{0.2f+(i%5)*0.05f,0.3f,0.4f,1};
             ctx->ClearRenderTargetView(target.Get(),rgba);
-            Sleep(50);
+            if(!pacing) Sleep(50);
             UINT before=0,after=0;
             Check(swapChain->GetLastPresentCount(&before));
             DXGI_PRESENT_PARAMETERS parameters{};
-            const UINT sync=fgLetterbox?0:fgScaled?2:1;
-            const UINT flags=fgLetterbox?DXGI_PRESENT_ALLOW_TEARING:0;
+            const UINT sync=(fgLetterbox || pacing)?0:fgScaled?2:1;
+            const UINT flags=(fgLetterbox || pacing)?DXGI_PRESENT_ALLOW_TEARING:0;
             Check(i%2==0?swapChain->Present(sync,flags):swapChain->Present1(sync,flags,&parameters));
             Check(swapChain->GetLastPresentCount(&after));
-            presentCalls[i]=after-before;
+            if(!pacing) presentCalls[i]=after-before;
         }
         bool reducedFgSize=false;
         bool letterboxViewport=false;
@@ -258,7 +270,18 @@ int wmain(int argc,wchar_t** argv) {
         printf("frames=%llu, provider=%s, result=%d, failed=%d\n",s.frames,s.provider,s.lastResult,s.failed);
         if(s.frames!=frameCount||s.failed||s.lastResult||strncmp(s.provider,"4.",2)) return 5;
         if(dynamic && s.contextStarts!=1) return 12;
-        if(fg) {
+        if(pacing) {
+            FILETIME kernelAfter{},userAfter{};
+            GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernelAfter,&userAfter);
+            const auto ticks=[](FILETIME v) { return (uint64_t{v.dwHighDateTime}<<32)|v.dwLowDateTime; };
+            const auto cpu=(ticks(kernelAfter)-ticks(kernelBefore)+ticks(userAfter)-ticks(userBefore))/10000.0;
+            const auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-started).count();
+            printf("Pacing: elapsed %.0f ms; CPU %.1f ms; FG prepared=%llu generated=%llu real=%llu\n",
+                elapsed,cpu,s.fgPrepared,s.fgGenerated,s.fgReal);
+            if(s.fgGenerated<1000 || !synchronizedPair) return 13;
+            swapChain.Reset();
+            DestroyWindow(window);
+        } else if(fg) {
             auto skipReason=reinterpret_cast<const char*(*)()>(GetProcAddress(dll,"FSR4_GetLastFgSkipReason"));
             const char* reason=skipReason?skipReason():nullptr;
             if(!reason || strcmp(reason,"History reset or first frame")) return 11;
