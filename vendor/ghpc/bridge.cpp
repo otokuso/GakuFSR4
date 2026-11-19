@@ -242,10 +242,12 @@ namespace
 	State& g = *new State;
 	std::mutex g_renderLock;
 	FgDropNotice g_fgDropNotice;
+	std::atomic<const char*> g_fgSkipReason{nullptr};
 
 	void InvalidateSkippedFgPresent()
 	{
 		if (!g_fgDropNotice.Consume()) return;
+		g_fgSkipReason = "Render lock contention";
 		g.fgPending = g.fgHavePrevious = false;
 		g.fgPendingReset = true;
 		g.stats.fgSkipped++;
@@ -253,6 +255,7 @@ namespace
 
 	void FgFailure(int stage, const char* name, ffxReturnCode_t code, uint64_t frameId)
 	{
+		g_fgSkipReason = "FG provider rejected the current frame";
 		if (g.fgErrors.Record(stage, (uint32_t)code))
 			Log("FG %s failed: %u (frame %llu).", name, (unsigned)code, (unsigned long long)frameId);
 	}
@@ -1061,6 +1064,7 @@ void main(uint3 id : SV_DispatchThreadID)
 				delay ? "Will retry after a cooldown." : "Retries exhausted until a resize/device change.");
 			g.fg = nullptr;
 			g.fgUnavailable = unsupported;
+			g_fgSkipReason = unsupported ? "FG provider or configuration unsupported" : "FG context creation failed";
 			CheckRemoved();
 			return false;
 		}
@@ -1096,6 +1100,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		g.fgRetry.ObserveScene(fd.displayW, fd.displayH, keyW, keyH);
 		if (!fd.fg || !g.fgDll || !PresentHooked() || g.fgUnavailable)
 		{
+			if (fd.fg && !PresentHooked()) g_fgSkipReason = "Waiting for a swap chain hook";
 			if (g.fg && WaitIdle("FG off")) DestroyFg();
 			g.fgPending = false;
 			if (!g.fgOffLogged) { g.fgOffLogged = true; Log("FG off."); }
@@ -1428,6 +1433,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!g.fgPending || sync > 4 || (flags & ~DXGI_PRESENT_ALLOW_TEARING) ||
 		(parameters && (parameters->DirtyRectsCount || parameters->pScrollRect || parameters->pScrollOffset)))
 	{
+		if (g.fgPending) g_fgSkipReason = "Present flags or dirty rectangles are incompatible";
 		g.fgPending = g.fgHavePrevious = false;
 		return false;
 	}
@@ -1447,6 +1453,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		g.fgContent = {};
+		g_fgSkipReason = "Incompatible backbuffer (FG requires single-sample RGBA8)";
 		return false;
 	}
 	const ImageRect content = g.fgViewportOverrideEnabled ? g.fgViewportOverride :
@@ -1458,6 +1465,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 			Log("FG viewport override %u,%u %ux%u is outside the %ux%u backbuffer or mismatches the %ux%u scene; skipping FG.",
 				content.x,content.y,content.width,content.height,bd.Width,bd.Height,g.fgSceneW,g.fgSceneH);
 		}
+		g_fgSkipReason = "Configured scene viewport is invalid";
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		return false;
@@ -1480,6 +1488,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		if (letterboxed)
 			Log("FG %s viewport: %u,%u %ux%u in %ux%u.", g.fgViewportOverrideEnabled ? "configured" : "centered", content.x, content.y, content.width, content.height, bd.Width, bd.Height);
 		if (previous.width) {
+			g_fgSkipReason = "Scene viewport changed";
 			g.fgHavePrevious = false;
 			g.stats.fgSkipped++;
 			return false;
@@ -1490,6 +1499,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		ComPtr<ID3D11Multithread> multithread;
 		if ((device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) || FAILED(g.ctx.As(&multithread))) {
 			g.fgUnavailable = true;
+			g_fgSkipReason = "The D3D11 context cannot be shared between render and Present threads";
 			Log("FG disabled: the render and present threads cannot share the D3D11 context.");
 			return false;
 		}
@@ -1519,6 +1529,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	double intervalMs = g.fgIntervalTicks * 1000.0 / qf.QuadPart;
 	if (sync < 2 && refreshMs > 0 && intervalMs > 0 && intervalMs < 2.0 * refreshMs * 0.98)
 	{
+		g_fgSkipReason = "Present interval too short for interpolation";
 		g.stats.fgNotNeeded++;
 		g.fgHavePrevious = false;
 		return false;
@@ -1533,6 +1544,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!ok) {
 		const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), false);
 		g.fgHavePrevious = false;
+		g_fgSkipReason = "FG backbuffer allocation failed";
 		Log("FG backbuffer allocation failed; %s",
 			delay ? "retrying after a cooldown." : "retries exhausted until a resize/device change.");
 		return false;
@@ -1602,7 +1614,11 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	}
 	g.fgHavePrevious = true;
 	FgRecovered();
-	if (!showGenerated || !d.numGeneratedFrames) { g.stats.fgSkipped++; return false; }
+	if (!showGenerated || !d.numGeneratedFrames) {
+		g_fgSkipReason = showGenerated ? "Provider generated no frame" : "History reset or first frame";
+		g.stats.fgSkipped++;
+		return false;
+	}
 
 	g.ctx->CopyResource(bb.Get(), g.gen.t11.Get());
 	// A flip-model Present at interval zero can discard the queued interpolation before scanout.
@@ -1696,6 +1712,7 @@ EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 		if (!d.empty() && d.back() != L'\\') d += L'\\';
 		g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		if (!g.fgDll) {
+			g_fgSkipReason = "AMD frame generation runtime DLL could not load";
 			Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
 			return 0;
 		}
@@ -1744,6 +1761,8 @@ EXPORT int FSR4_PollLog(char* buf, int cap)
 	g_log.pop_front();
 	return n;
 }
+
+EXPORT const char* FSR4_GetLastFgSkipReason() { return g_fgSkipReason.load(); }
 
 EXPORT void FSR4_GetStats(Stats* out)
 {
