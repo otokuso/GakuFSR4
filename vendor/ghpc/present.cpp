@@ -9,6 +9,7 @@
 #include <mutex>
 #include "GakuPlugin.h"
 #include "../../src/PresentHookSlots.h"
+#include "../../src/PresentHookRetry.h"
 #include "../../src/PresentRate.h"
 #include "../../src/NativeSwapchain.h"
 
@@ -33,7 +34,7 @@ namespace
 	CreateForHwndFn g_createForHwnd = nullptr;
 	std::atomic<bool> g_capture{ false };
 	std::atomic<bool> g_tryNative{ false };
-	bool g_tried = false;
+	PresentHookRetry g_probeRetry;
 	std::atomic<bool> g_hooked{ false };
 	std::atomic<HWND> g_window{ nullptr };
 	std::atomic<uint64_t> g_presents{ 0 };
@@ -205,8 +206,9 @@ namespace
 
 	void Hook(ID3D11Resource* any)
 	{
-		if (g_tried) return;
-		g_tried = true;
+		// A temporary window or DXGI chain can fail while Unity is starting up.
+		// Keep probing after a cooldown until at least one vtable is hooked.
+		if (g_hooked || !g_probeRetry.Allow(GetTickCount64())) return;
 		ComPtr<ID3D11Device> dev;
 		any->GetDevice(&dev);
 		ComPtr<IDXGIDevice> xd;

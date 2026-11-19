@@ -8,6 +8,7 @@
 #include "FgViewportMath.h"
 #include "ExposurePolicy.h"
 #include "PresentHookSlots.h"
+#include "PresentHookRetry.h"
 #include "FgDropNotice.h"
 #include "TaaJitter.h"
 #include "Preset.h"
@@ -118,6 +119,32 @@ int main() {
     assert(!retry.Ready(2000000));
     retry.NewDevice();
     assert(retry.Ready(0));
+    // A successful D3D11 shared-texture allocation does not mean FG dispatch
+    // succeeded. Simulate Configure/Prepare/Dispatch errors in sequence.
+    FgRetry providerErrors;
+    providerErrors.ObserveScene(1920,1080,1280,720);
+    providerErrors.ObserveBackbuffer(1920,1080);
+    uint64_t retryTime = 1000;
+    for(uint32_t failure=1;failure<=FgRetry::MaxFailures;++failure) {
+        assert(providerErrors.Ready(retryTime));
+        const auto delay = providerErrors.Failed(retryTime,false);
+        if(failure<FgRetry::MaxFailures) {
+            assert(delay==500u<<(failure-1));
+            assert(!providerErrors.Ready(retryTime+delay-1));
+            retryTime+=delay;
+        } else {
+            assert(delay==0);
+            assert(!providerErrors.Ready(retryTime+60000));
+        }
+    }
+    providerErrors.ObserveBackbuffer(1920,1080);
+    assert(!providerErrors.Ready(retryTime+60000));
+    providerErrors.ObserveBackbuffer(1600,900);
+    assert(providerErrors.Ready(retryTime));
+    providerErrors.Failed(retryTime,false);
+    assert(!providerErrors.Ready(retryTime));
+    providerErrors.Recovered(); // Only a successful FG dispatch resets the budget.
+    assert(providerErrors.Ready(retryTime));
     float prevForward[3]{0,0,1};
     float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
     float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
@@ -177,6 +204,13 @@ int main() {
     assert(hooked.Find(&first[8]) == &original1);
     assert(hooked.Find(&second[8]) == &original2);
     assert(hooked.Find(&second[22]) == nullptr);
+    PresentHookRetry presentProbe;
+    assert(presentProbe.Allow(1000));
+    assert(!presentProbe.Allow(1001));
+    assert(!presentProbe.Allow(5999));
+    assert(presentProbe.Allow(6000));
+    assert(!presentProbe.Allow(6001));
+    assert(presentProbe.Allow(100)); // permit re-probe if the monotonic clock resets
     FgDropNotice dropNotice;
     int gameChain=0, gameChain1=0, otherChain=0;
     dropNotice.SetTarget(&gameChain,&gameChain1);
