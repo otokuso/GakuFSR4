@@ -21,6 +21,7 @@ struct FrameData {
 };
 static_assert(sizeof(FrameData)==176);
 void Check(HRESULT hr){ if(FAILED(hr)) throw std::runtime_error("D3D11 operation failed"); }
+bool CheckBgraRoundTrip(ID3D11Device* device, ID3D11DeviceContext* context);
 int wmain(int argc,wchar_t** argv) {
     setvbuf(stdout,nullptr,_IONBF,0);
     puts("GPU test: starting standalone harness");
@@ -35,7 +36,10 @@ int wmain(int argc,wchar_t** argv) {
     const bool fgResized=fgScaled||fgLetterbox||fgCross;
     const bool fgDistortion=argc==4&&wcscmp(argv[3],L"--fg-distortion")==0;
     const bool fgHudless=argc==4&&wcscmp(argv[3],L"--fg-hudless")==0;
-    const bool fg=fgHudless||fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
+    const bool fgBgra=argc==4&&wcscmp(argv[3],L"--fg-bgra")==0;
+    const bool fgRgb10=argc==4&&wcscmp(argv[3],L"--fg-rgb10")==0;
+    const bool unsupportedFormat=fgBgra||fgRgb10;
+    const bool fg=unsupportedFormat||fgHudless||fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||fgCross||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
     if(argc==4&&!portrait&&!fg&&!dynamic) return 2;
     auto dll=LoadLibraryW(argv[1]);if(!dll) return 3;
@@ -65,6 +69,7 @@ int wmain(int argc,wchar_t** argv) {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> ctx;
         Check(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&ctx));
         puts("GPU test: D3D11 device created");
+        if(fgBgra && !CheckBgraRoundTrip(device.Get(),ctx.Get())) return 14;
         auto make=[&](int w,int h,DXGI_FORMAT format,UINT bind) {
             D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.Format=format;
             d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.BindFlags=bind;
@@ -105,7 +110,7 @@ int wmain(int argc,wchar_t** argv) {
             DXGI_SWAP_CHAIN_DESC1 desc{};
             desc.Width=fgCross?1920:fgResized?dw/2:dw;
             desc.Height=fgCross?1080:fgLetterbox?1080:fgScaled?dh/2:dh;
-            desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.Format=fgBgra?DXGI_FORMAT_B8G8R8A8_UNORM:fgRgb10?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
             desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
             if(fgLetterbox) desc.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -238,13 +243,15 @@ int wmain(int argc,wchar_t** argv) {
             Check(swapChain->GetLastPresentCount(&after));
             presentCalls[i]=after-before;
         }
+        if(unsupportedFormat) render(0,nullptr); // Publish the final fallback counters.
         bool reducedFgSize=false;
         bool letterboxViewport=false;
         bool crossViewport=false;
         bool synchronizedPair=false;
-        bool distortionUploaded=false, distortionRejected=false;
+        bool distortionUploaded=false, distortionRejected=false, formatLogged=false;
         char log[1024];while(poll(log,sizeof log)>0) {
             puts(log);
+            formatLogged|=strstr(log,fgBgra?"BGRA8 (requires a format-conversion path)":"RGB10A2")!=nullptr;
             distortionUploaded|=strstr(log,"FG distortion: uploaded radial UV offsets")!=nullptr;
             distortionRejected|=strstr(log,"FG provider rejected radial distortion field")!=nullptr;
             reducedFgSize|=strstr(log,"FG context: inputs up to 1440x2560, display 1440x2560")!=nullptr;
@@ -261,15 +268,20 @@ int wmain(int argc,wchar_t** argv) {
         if(fg) {
             auto skipReason=reinterpret_cast<const char*(*)()>(GetProcAddress(dll,"FSR4_GetLastFgSkipReason"));
             const char* reason=skipReason?skipReason():nullptr;
-            if(!reason || strcmp(reason,"History reset or first frame")) return 11;
+            if(unsupportedFormat) {
+                if(!reason || !strstr(reason,"Incompatible backbuffer") || !formatLogged ||
+                   s.fgGenerated || s.fgReal || s.fgSkipped!=static_cast<uint64_t>(frameCount)) return 15;
+                for(UINT count:presentCalls) if(count!=1) return 15;
+                puts("PASS: unsupported format shows its skip reason and presents every real frame.");
+            } else if(!reason || strcmp(reason,"History reset or first frame")) return 11;
             printf("FG provider=%s, prepared=%llu, generated=%llu, real=%llu, Presents/frame=%u,%u,%u,%u,%u\n",
                 s.fgProvider,s.fgPrepared,s.fgGenerated,s.fgReal,
                 presentCalls[0],presentCalls[1],presentCalls[2],presentCalls[3],presentCalls[4]);
             const uint64_t expectedGenerated=fgResized?2:3;
-            if(strncmp(s.fgProvider,"4.0.2",5)||s.fgPrepared!=frameCount||s.fgGenerated!=expectedGenerated||
+            if(!unsupportedFormat && (strncmp(s.fgProvider,"4.0.2",5)||s.fgPrepared!=frameCount||s.fgGenerated!=expectedGenerated||
                s.fgReal!=expectedGenerated||reducedFgSize!=fgScaled||letterboxViewport!=fgLetterbox||crossViewport!=fgCross||
                synchronizedPair!=fgLetterbox||presentCalls[0]!=1||
-               presentCalls[1]!=(fgResized?1u:2u)||presentCalls[2]!=2||presentCalls[3]!=2||presentCalls[4]!=1) return 9;
+               presentCalls[1]!=(fgResized?1u:2u)||presentCalls[2]!=2||presentCalls[3]!=2||presentCalls[4]!=1)) return 9;
             swapChain.Reset();
             DestroyWindow(window);
         }
@@ -288,7 +300,8 @@ int wmain(int argc,wchar_t** argv) {
             void* view=nullptr;
             if(hudlessView(&view) || view) return 10;
         }
-        puts(fg?"PASS: FSR FG 4.0.2 GPU dispatch and generated frames through Present and Present1."
+        puts(unsupportedFormat?"PASS: FSR dispatch and safe real-frame fallback."
+               :fg?"PASS: FSR FG 4.0.2 GPU dispatch and generated frames through Present and Present1."
                :dynamic?"PASS: moving object position and old-location ghost checks, camera cuts, dynamic resolution and auto exposure."
                :"PASS: actual FSR 4 GPU dispatch and output readback; the game was not started.");
         // Keep the module resident: its backend owns the D3D12 context until process exit.
