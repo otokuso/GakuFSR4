@@ -1,5 +1,6 @@
 #include "FrameMath.h"
 #include "Preset.h"
+#include "PrimaryCamera.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
@@ -17,6 +18,16 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    PrimaryCamera camera;
+    assert(camera.Allow(11,10));
+    assert(!camera.Allow(22,10));
+    assert(camera.Allow(11,11));
+    assert(!camera.Allow(22,11));
+    assert(!camera.Allow(22,12)); // retain the first camera across a one-frame gap
+    assert(camera.Allow(22,13)); // first camera disappeared, allow replacement
+    assert(!camera.Allow(11,13));
+    camera.Reset();
+    assert(camera.Allow(11,14));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
