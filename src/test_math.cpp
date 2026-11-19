@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "TaaJitter.h"
 #include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -17,6 +18,15 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    auto generated=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,1.0f);
+    assert(std::isfinite(generated.x) && std::isfinite(generated.y));
+    assert(std::fabs(generated.x)+std::fabs(generated.y)>0);
+    auto generatedNext=RepairTaaJitter(0,0,1920,1080,1280,720,2,0,1.0f);
+    assert(generated.x!=generatedNext.x || generated.y!=generatedNext.y);
+    auto rescaled=RepairTaaJitter(0.25f/1920,0.5f/1080,1920,1080,1280,720,1,0,1.0f);
+    assert(std::fabs(rescaled.x-0.25f/1280)<0.000001f);
+    assert(std::fabs(rescaled.y-0.5f/720)<0.000001f);
+    assert(std::fabs(TaaHalton(1,2)-0.5f)<0.000001f);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
