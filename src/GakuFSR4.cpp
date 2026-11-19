@@ -31,6 +31,7 @@ void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
 }
 void Stop(const std::string& why) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
 
@@ -630,6 +631,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
