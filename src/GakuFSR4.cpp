@@ -9,6 +9,7 @@
 #include "ResourceLifetime.h"
 #include "MipBias.h"
 #include "PrimaryCamera.h"
+#include "TaaJitter.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -337,6 +338,10 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         if(configuredCameras.size()>=32) return;
         configuredCameras.push_back(id);
         P desc=static_cast<char*>(cd)+field.descriptor;
+        auto matrix=reinterpret_cast<float*>(static_cast<char*>(cd)+field.matrix);
+        const float oldJitterX=matrix[12],oldJitterY=matrix[13];
+        const int oldW=At<int>(desc,field.descWidth),oldH=At<int>(desc,field.descHeight);
+        const int oldAA=At<int>(cd,field.aa);
         At<int>(desc,field.descMsaa)=1;
         At<int>(cd,field.aa)=3;
         At<float>(cd,field.scale)=1/ratio;
@@ -345,10 +350,17 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         At<int>(cd,field.filter)=offscreen?0:2;
         At<int>(desc,field.descWidth)=w;
         At<int>(desc,field.descHeight)=h;
+        auto taa=static_cast<char*>(cd)+field.taaSettings;
+        const auto jitter=RepairTaaJitter(oldJitterX,oldJitterY,oldW,oldH,w,h,frame,
+            At<int>(taa,field.taaOffset),At<float>(taa,field.taaJitter));
+        matrix[12]=jitter.x;matrix[13]=jitter.y;
         static bool reported=false;
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
             std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)+
-            (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")); }
+            (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")+
+            "; original AA "+std::to_string(oldAA)+", jitter scale "+std::to_string(At<float>(taa,field.taaJitter))+
+            ", jitter matrix offset "+std::to_string(oldJitterX)+","+std::to_string(oldJitterY)+
+            " -> "+std::to_string(jitter.x)+","+std::to_string(jitter.y)); }
         static bool reportedBias=false;
         if(!reportedBias&&ratio>1) { reportedBias=true;Log("FSR recommended Mip LOD bias at ratio "+
             std::to_string(ratio)+": "+std::to_string(RecommendedFsrMipBias(ratio))+
@@ -417,7 +429,11 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
             BlitCamera(cmd,src,dst);
         }
         static bool reported=false;
-        if(!reported) { reported=true; Log("Captured first camera motion vectors and jitter"); }
+        if(!reported) {
+            reported=true;
+            Log("Captured first camera motion vectors; FSR jitter "+std::to_string(capture.jitterX)+","+
+                std::to_string(capture.jitterY)+" px");
+        }
         return;
     } catch(const ManagedFailure& e) {
         if(offscreen && id!=0) {
@@ -606,6 +622,8 @@ void Bind() {
     auto ct=reinterpret_cast<ClassTypeFn>(GetProcAddress(static_cast<HMODULE>(runtime.getGameAssembly()),"il2cpp_class_from_type"));
     if(!ft||!ct) throw std::runtime_error("Missing field type API");
     P settings=ct(ft(settingsField));field.reset=api.Offset(settings,"resetHistoryFrames",true);
+    field.taaOffset=api.Offset(settings,"jitterFrameCountOffset",true);
+    field.taaJitter=api.Offset(settings,api.class_get_field_from_name(settings,"m_JitterScale")?"m_JitterScale":"jitterScale",true);
     field.cameraSize=api.class_value_size(cd,nullptr);field.descSize=api.class_value_size(desc,nullptr);
     field.rtiSize=api.class_value_size(method.rtiClass,nullptr);
     if(field.cameraSize<256||field.cameraSize>4096||field.rtiSize>256||field.rtiSize<16)

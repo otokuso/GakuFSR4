@@ -8,6 +8,7 @@
 #include "ExposurePolicy.h"
 #include "PresentHookSlots.h"
 #include "FgDropNotice.h"
+#include "TaaJitter.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
 #include "PrimaryCamera.h"
@@ -163,6 +164,17 @@ int main() {
     assert(camera.Allow(33,2));
     camera.Reset();
     assert(camera.Allow(11,14));
+    auto generated=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,1.0f);
+    assert(std::isfinite(generated.x) && std::isfinite(generated.y));
+    assert(std::fabs(generated.x)+std::fabs(generated.y)>0);
+    auto generatedDefault=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,0.0f);
+    assert(generatedDefault.x==generated.x && generatedDefault.y==generated.y);
+    auto generatedNext=RepairTaaJitter(0,0,1920,1080,1280,720,2,0,1.0f);
+    assert(generated.x!=generatedNext.x || generated.y!=generatedNext.y);
+    auto rescaled=RepairTaaJitter(0.25f/1920,0.5f/1080,1920,1080,1280,720,1,0,1.0f);
+    assert(std::fabs(rescaled.x-0.25f/1280)<0.000001f);
+    assert(std::fabs(rescaled.y-0.5f/720)<0.000001f);
+    assert(std::fabs(TaaHalton(1,2)-0.5f)<0.000001f);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
