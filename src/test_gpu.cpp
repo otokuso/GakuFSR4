@@ -9,6 +9,8 @@
 #include <cmath>
 #include <stdexcept>
 #include "TestHalfFloat.h"
+#include "BridgeStats.h"
+#include "FrameMath.h"
 using Microsoft::WRL::ComPtr;
 struct FrameData {
     void *color,*depth,*motion,*output;
@@ -18,15 +20,6 @@ struct FrameData {
     void* hudless;uint32_t fg;float pos[3],up[3],right[3],fwd[3];
 };
 static_assert(sizeof(FrameData)==176);
-struct Stats {
-    uint64_t frames,providerId;
-    int32_t lastResult,failed;
-    char provider[64],adapter[128],upscaleStats[304];
-    char fgProvider[64];
-    uint64_t fgProviderId,fgPrepared,fgGenerated,fgReal;
-    char remainingStats[64];
-};
-static_assert(sizeof(Stats)==680);
 void Check(HRESULT hr){ if(FAILED(hr)) throw std::runtime_error("D3D11 operation failed"); }
 int wmain(int argc,wchar_t** argv) {
     setvbuf(stdout,nullptr,_IONBF,0);
@@ -79,7 +72,7 @@ int wmain(int argc,wchar_t** argv) {
         };
         const int dw=fgCross?1080:fgLetterbox?3840:(fgScaled||nativeAA||quality)?2160:fg?960:portrait?1080:1920;
         const int dh=fgCross?1920:fgLetterbox?1634:(fgScaled||nativeAA||quality)?3840:fg?540:portrait?1920:1080;
-        const int w=nativeAA?dw:dw*2/3,h=nativeAA?dh:dh*2/3;
+        int w=nativeAA?dw:dw*2/3,h=nativeAA?dh:dh*2/3;
         auto color=make(w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
         auto depth=make(w,h,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
         auto motion=make(w,h,DXGI_FORMAT_R16G16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
@@ -121,37 +114,107 @@ int wmain(int argc,wchar_t** argv) {
             fd.fg=1;fd.frameTimeMs=50;
             fd.up[1]=fd.right[0]=fd.fwd[2]=1;
         }
-        const int frameCount=fg?5:dynamic?6:4;
+        const int frameCount=fg?5:dynamic?8:4;
+        ComPtr<ID3D11Texture2D> dynamicReadback;
+        const float positions[][2]={{.22f,.25f},{.38f,.25f},{.38f,.48f},{.60f,.65f},
+                                    {.60f,.40f},{.33f,.40f},{.33f,.21f},{.49f,.21f}};
+        float oldX=0,oldY=0,oldFov=0;
+        if(dynamic) {
+            // HDR, automatic exposure and dynamic resolution with a fixed display target.
+            fd.createFlags|=(1<<0)|(1<<6);
+            fd.exposure=0;
+            D3D11_TEXTURE2D_DESC desc{};
+            output->GetDesc(&desc);
+            desc.Usage=D3D11_USAGE_STAGING;
+            desc.BindFlags=0;
+            desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            Check(device->CreateTexture2D(&desc,nullptr,&dynamicReadback));
+        }
         UINT presentCalls[5]{};
         for(int i=0;i<frameCount;++i) {
-            fd.reset=i==0||(fg&&i==frameCount-1)||(dynamic&&i==3);
+            fd.reset=i==0||(fg&&i==frameCount-1);
+            int objectX=0,objectY=0;
+            float light=1;
             if(dynamic) {
-                const int objectX=w/3+i*12,objectY=h/3+(i%3)*8;
+                const bool resized=i==5;
+                if(resized) {
+                    w=static_cast<int>(fd.maxRenderW)*3/4;
+                    h=static_cast<int>(fd.maxRenderH)*3/4;
+                    color=make(w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
+                    depth=make(w,h,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
+                    motion=make(w,h,DXGI_FORMAT_R16G16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
+                    pixels.resize(static_cast<size_t>(w)*h*4);
+                    z.assign(static_cast<size_t>(w)*h,0.5f);
+                    mv.resize(static_cast<size_t>(w)*h*2);
+                    fd.color=color.Get();fd.depth=depth.Get();fd.motion=motion.Get();
+                    fd.renderW=w;fd.renderH=h;
+                    ctx->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
+                }
+                objectX=static_cast<int>(positions[i][0]*w);
+                objectY=static_cast<int>(positions[i][1]*h);
+                const float fov=i<3?50.0f:70.0f;
+                const float position[3]{i<3?0.0f:100.0f,0,0};
+                const float forward[3]{i<3?0.0f:1.0f,0,i<3?1.0f:0.0f};
+                fd.reset=resized||frame_math::Reset(1,1,i,i-1,fov,oldFov,position,fd.pos)||
+                    frame_math::RotationJump(forward,fd.fwd);
+                if(fd.reset!=(i==0||i==3||resized)) return 12;
+                memcpy(fd.pos,position,sizeof position);
+                memcpy(fd.fwd,forward,sizeof forward);
+                fd.fovV=fov*0.01745329252f;
+                oldFov=fov;
+                fd.jitterX=i%2?0.25f:-0.25f;
+                fd.jitterY=(i%3-1)*0.25f;
+                fd.mvScaleX=static_cast<float>(w);
+                fd.mvScaleY=static_cast<float>(h);
+                const auto mx=TestFloatToHalf(fd.reset?0:oldX-static_cast<float>(objectX)/w);
+                const auto my=TestFloatToHalf(fd.reset?0:oldY-static_cast<float>(objectY)/h);
+                light=i==6?0.30f:i==7?0.80f:1.0f;
+                const auto bright=TestFloatToHalf(light);
+                const auto dark=TestFloatToHalf(0.22f*light);
+                const auto mid=TestFloatToHalf(0.65f*light);
                 for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
-                    const bool moving=x>=objectX&&x<objectX+64&&y>=objectY&&y<objectY+64;
+                    const bool moving=std::abs(x-objectX)<w/32 && std::abs(y-objectY)<h/24;
                     const size_t p=(static_cast<size_t>(y)*w+x)*4;
-                    pixels[p]=moving?0x3c00:(x<w/2?0x3400:0x3a00);
-                    pixels[p+1]=moving?0x3c00:0x3800;
-                    pixels[p+2]=moving?0x3c00:0x3000;
+                    pixels[p]=moving?bright:x<w/2?dark:mid;
+                    pixels[p+1]=pixels[p+2]=dark;
+                    pixels[p+3]=0x3c00;
                     const size_t m=(static_cast<size_t>(y)*w+x)*2;
-                    mv[m]=moving?TestFloatToHalf(-12.0f/w):0;
-                    mv[m+1]=moving?TestFloatToHalf(-8.0f/h):0;
+                    mv[m]=moving?mx:0;
+                    mv[m+1]=moving?my:0;
                 }
                 ctx->UpdateSubresource(color.Get(),0,nullptr,pixels.data(),w*8,0);
                 ctx->UpdateSubresource(motion.Get(),0,nullptr,mv.data(),w*4,0);
-                fd.jitterX=i%2?0.25f:-0.25f;
-                fd.jitterY=(i%3-1)*0.25f;
-                fd.fovV=i<3?1.0f:1.2f;
-                fd.pos[0]=i<3?0:100;
-                fd.fwd[0]=i<3?0:1;
-                fd.fwd[2]=i<3?1:0;
-                fd.exposure=i<3?1.0f:1.3f;
-                printf("Dynamic frame %d: moving square (%d,%d), jitter (%.2f,%.2f), camera cut=%d, exposure=%.2f\n",
-                    i,objectX,objectY,fd.jitterX,fd.jitterY,fd.reset,fd.exposure);
             }
             printf("GPU test: dispatch %d\n",i);
             if(fgHudless) fd.hudless=i%2==0 ? fd.output : nullptr;
             render(1,&fd);
+            if(dynamic) {
+                ctx->CopyResource(dynamicReadback.Get(),output.Get());
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                Check(ctx->Map(dynamicReadback.Get(),0,D3D11_MAP_READ,0,&mapped));
+                const auto threshold=TestFloatToHalf(0.83f*light);
+                uint64_t sumX=0,sumY=0,count=0;
+                for(int y=0;y<dh;++y) {
+                    auto* row=reinterpret_cast<const uint16_t*>(static_cast<const char*>(mapped.pData)+mapped.RowPitch*y);
+                    for(int x=0;x<dw;++x) {
+                        const auto red=row[x*4];
+                        if(red>=threshold && red<0x7c00) { sumX+=x; sumY+=y; ++count; }
+                    }
+                }
+                const auto* oldRow=reinterpret_cast<const uint16_t*>(static_cast<const char*>(mapped.pData)+
+                    mapped.RowPitch*static_cast<int>(oldY*dh));
+                const auto oldPixel=oldRow[static_cast<int>(oldX*dw)*4];
+                ctx->Unmap(dynamicReadback.Get(),0);
+                oldX=static_cast<float>(objectX)/w;
+                oldY=static_cast<float>(objectY)/h;
+                const double actualX=count?static_cast<double>(sumX)/count:0;
+                const double actualY=count?static_cast<double>(sumY)/count:0;
+                printf("dynamic %d %dx%d reset=%d light=%.2f center=(%.1f,%.1f) expected=(%.1f,%.1f) old-center=0x%04X threshold=0x%04X\n",
+                    i,w,h,fd.reset,light,actualX,actualY,oldX*dw,oldY*dh,oldPixel,threshold);
+                if(count<static_cast<uint64_t>(dw)*dh/400 ||
+                   std::abs(actualX-oldX*dw)>8 || std::abs(actualY-oldY*dh)>8 ||
+                   (i>0 && oldPixel>=threshold)) return 12;
+            }
             if(fgHudless) {
                 void* view=nullptr;
                 const auto generation=hudlessView(&view);
@@ -194,6 +257,7 @@ int wmain(int argc,wchar_t** argv) {
         Stats s{};stats(&s);
         printf("frames=%llu, provider=%s, result=%d, failed=%d\n",s.frames,s.provider,s.lastResult,s.failed);
         if(s.frames!=frameCount||s.failed||s.lastResult||strncmp(s.provider,"4.",2)) return 5;
+        if(dynamic && s.contextStarts!=1) return 12;
         if(fg) {
             auto skipReason=reinterpret_cast<const char*(*)()>(GetProcAddress(dll,"FSR4_GetLastFgSkipReason"));
             const char* reason=skipReason?skipReason():nullptr;
@@ -225,7 +289,7 @@ int wmain(int argc,wchar_t** argv) {
             if(hudlessView(&view) || view) return 10;
         }
         puts(fg?"PASS: FSR FG 4.0.2 GPU dispatch and generated frames through Present and Present1."
-               :dynamic?"PASS: moving scene, nonzero jitter, camera-cut reset and exposure-change FSR dispatch; inspect frame quality separately."
+               :dynamic?"PASS: moving object position and old-location ghost checks, camera cuts, dynamic resolution and auto exposure."
                :"PASS: actual FSR 4 GPU dispatch and output readback; the game was not started.");
         // Keep the module resident: its backend owns the D3D12 context until process exit.
         return 0;
