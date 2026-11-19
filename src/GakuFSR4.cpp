@@ -366,6 +366,11 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     auto& fd=packet->data;
     fd.color=resources.color.native;fd.depth=resources.depth.native;
     fd.motion=resources.motion.native;fd.output=resources.output.native;
+    // On the screen-camera path this command is recorded in RenderFinalPass,
+    // before later overlay UI may be drawn to the game's swap chain. Expose the
+    // pre-overlay FSR output for HUDless/UI composition validation. Whether
+    // every in-game canvas is absent must still be verified in the target game.
+    fd.hudless=frameGeneration && !At<P>(cd,field.target) ? fd.output : nullptr;
     P pointers[]{fd.color,fd.depth,fd.motion,fd.output};
     for(int i=0;i<4;++i) packet->textures[i]=static_cast<ID3D11Resource*>(pointers[i]);
     fd.renderW=w;fd.renderH=h;fd.displayW=dw;fd.displayH=dh;
