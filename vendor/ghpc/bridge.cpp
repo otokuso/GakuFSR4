@@ -114,8 +114,9 @@ namespace
 
 	void OnFfxMessage(uint32_t type, const wchar_t* message)
 	{
-		char buf[1024];
-		WideCharToMultiByte(CP_UTF8, 0, message, -1, buf, sizeof buf, nullptr, nullptr);
+		char buf[1024]{};
+		if (!message || !WideCharToMultiByte(CP_UTF8, 0, message, -1, buf, sizeof buf, nullptr, nullptr))
+			snprintf(buf, sizeof buf, "(message unavailable)");
 		const char* kind = type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning";
 		uint64_t n;
 		{
@@ -258,6 +259,14 @@ namespace
 		g_fgSkipReason = "FG provider rejected the current frame";
 		if (g.fgErrors.Record(stage, (uint32_t)code))
 			Log("FG %s failed: %u (frame %llu).", name, (unsigned)code, (unsigned long long)frameId);
+	}
+
+	void BackoffFgFailure()
+	{
+		if (!g.fgRetry.Failed(GetTickCount64(), false)) {
+			g_fgSkipReason = "FG retries exhausted until a scene resize or device change";
+			Log("FG provider errors exhausted the retry budget; continuing to upscale without FG until the scene or backbuffer changes.");
+		}
 	}
 
 	void FgRecovered()
@@ -463,7 +472,7 @@ namespace
 			g.queue.Detach();
 			g.d12.Detach();
 		}
-		for (int i = 0; i < Slots; i++) { g.allocFence[i] = 0; g.slotTimed[i] = false; }
+		for (int i = 0; i < Slots; i++) { g.allocFence[i] = 0; g.slotTimed[i] = false; g.slotFg[i] = false; }
 		g.in11.Reset();
 		g.out11.Reset();
 		g.ctx.Reset();
@@ -851,12 +860,13 @@ void main(uint3 id : SV_DispatchThreadID)
 	{
 		if (!g.slotTimed[slot]) return;
 		g.slotTimed[slot] = false;
+		const bool fg = g.slotFg[slot];
+		g.slotFg[slot] = false;
 		D3D12_RANGE r = { slot * 2 * sizeof(uint64_t), (slot * 2 + 2) * sizeof(uint64_t) };
 		void* p = nullptr;
 		if (FAILED(g.readback->Map(0, &r, &p))) return;
 		const uint64_t* t = (const uint64_t*)((const char*)p + r.Begin);
-		if (t[1] > t[0]) Average(g.slotFg[slot] ? g.stats.fgGpuMs : g.stats.gpuMs, (t[1] - t[0]) * g.tickMs);
-		g.slotFg[slot] = false;
+		if (t[1] > t[0]) Average(fg ? g.stats.fgGpuMs : g.stats.gpuMs, (t[1] - t[0]) * g.tickMs);
 		D3D12_RANGE none = { 0, 0 };
 		g.readback->Unmap(0, &none);
 	}
@@ -1107,7 +1117,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			return;
 		}
 		if (!g.fgRetry.Ready(GetTickCount64())) { g.fgPending = false; return; }
-		if (!EnsureFg(fd, keyW, keyH)) { g.fgPending = false; return; }
+		if (!EnsureFg(fd, keyW, keyH)) { g.fgPending = false; g.stats.fgSkipped++; return; }
 		uint64_t id = ++g.fgFrameId;
 		ffxConfigureDescFrameGeneration c = {};
 		c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
@@ -1132,7 +1142,13 @@ void main(uint3 id : SV_DispatchThreadID)
 			c.header.pNext=nullptr;
 			rc=g.fx.Configure(&g.fg,&c.header);
 		}
-		if (rc != FFX_API_RETURN_OK) { FgFailure(1, "configure", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) {
+			FgFailure(1, "configure", rc, id);
+			BackoffFgFailure();
+			g.fgPending = g.fgHavePrevious = false;
+			g.stats.fgSkipped++;
+			return;
+		}
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 		p.frameID = id;
@@ -1154,7 +1170,13 @@ void main(uint3 id : SV_DispatchThreadID)
 		memcpy(p.cameraRight, fd.camRight, sizeof p.cameraRight);
 		memcpy(p.cameraForward, fd.camFwd, sizeof p.cameraForward);
 		rc = g.fx.Dispatch(&g.fg, &p.header);
-		if (rc != FFX_API_RETURN_OK) { FgFailure(2, "prepare", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) {
+			FgFailure(2, "prepare", rc, id);
+			BackoffFgFailure();
+			g.fgPending = g.fgHavePrevious = false;
+			g.stats.fgSkipped++;
+			return;
+		}
 		g.stats.fgPrepared++;
 		g.fgPending = true;
 		g.fgPendingReset = p.reset;
@@ -1304,6 +1326,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		if (!Check(g.queue->Signal(g.out12.Get(), done), "queue Signal")) { Fail("fence (above)."); return; }
 		g.allocFence[slot] = done;
 		g.slotTimed[slot] = true;
+		g.slotFg[slot] = false;
 		g.submits++;
 
 		if (!Check(g.ctx->Wait(g.out11.Get(), done), "D3D11 Wait")) { Fail("fence (above)."); return; }
@@ -1544,12 +1567,12 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!ok) {
 		const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), false);
 		g.fgHavePrevious = false;
+		g.stats.fgSkipped++;
 		g_fgSkipReason = "FG backbuffer allocation failed";
 		Log("FG backbuffer allocation failed; %s",
 			delay ? "retrying after a cooldown." : "retries exhausted until a resize/device change.");
 		return false;
 	}
-	g.fgRetry.Recovered();
 	const Shared& source = scaled ? g.fgColor : g.present;
 	const Shared& output = scaled ? g.fgOutput : g.gen;
 
@@ -1607,6 +1630,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (rc != FFX_API_RETURN_OK)
 	{
 		FgFailure(3, "dispatch", rc, g.fgFrameId);
+		BackoffFgFailure();
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		CheckRemoved();
@@ -1614,6 +1638,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	}
 	g.fgHavePrevious = true;
 	FgRecovered();
+	g.fgRetry.Recovered();
 	if (!showGenerated || !d.numGeneratedFrames) {
 		g_fgSkipReason = showGenerated ? "Provider generated no frame" : "History reset or first frame";
 		g.stats.fgSkipped++;

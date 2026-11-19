@@ -108,6 +108,31 @@ int main() {
     assert(!retry.Ready(2000000));
     retry.NewDevice();
     assert(retry.Ready(0));
+    // Repeated SDK Configure/Prepare/Dispatch errors must be throttled even
+    // when the shared backbuffer allocation succeeds on every attempt.
+    FgRetry providerErrors;
+    providerErrors.ObserveScene(1920,1080,1280,720);
+    providerErrors.ObserveBackbuffer(1920,1080);
+    uint64_t retryTime = 1000;
+    for(uint32_t failure=1;failure<=FgRetry::MaxFailures;++failure) {
+        assert(providerErrors.Ready(retryTime));
+        const uint32_t delay=providerErrors.Failed(retryTime,false);
+        if(failure<FgRetry::MaxFailures) {
+            assert(delay>0);
+            assert(!providerErrors.Ready(retryTime+delay-1));
+            retryTime+=delay;
+        } else {
+            assert(delay==0);
+            assert(!providerErrors.Ready(retryTime+16000));
+        }
+    }
+    providerErrors.ObserveBackbuffer(1920,1080);
+    assert(!providerErrors.Ready(retryTime+60000));
+    providerErrors.ObserveBackbuffer(1600,900);
+    assert(providerErrors.Ready(retryTime));
+    providerErrors.Failed(retryTime,false);
+    providerErrors.Recovered(); // Actual successful FG dispatch clears transient errors.
+    assert(providerErrors.Ready(retryTime));
     float prevForward[3]{0,0,1};
     float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
     float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut

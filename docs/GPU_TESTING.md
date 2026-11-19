@@ -27,4 +27,6 @@ The GitHub Actions `windows-ci.yml` workflow builds Debug and Release on Windows
 
 5. Record GPU model/driver, OS build, adapter/display resolution, FG enabled/disabled, game-camera orientation, and GPU test logs. Verify Present/Present1, portrait/landscape, resize, UI/HDR and device-loss cases separately in the real game. These cases are not covered by hosted Windows CI.
 
+6. When the installed FG provider reports a Configure, Prepare, or Dispatch failure, confirm that the plugin continues upscaling, stops attempting FG until each retry delay expires (0.5, 1, 2, 4, and 8 seconds), and stops retrying after the sixth consecutive error. The last skip reason should identify an exhausted retry budget. A successful FG dispatch should reset that budget; a scene or backbuffer resize should allow a new attempt. The host's CPU/GPU timing counters must continue to identify upscale work separately from FG work after a device reset. This is a manual fault-recovery check, not something the standard synthetic GPU harness injects today.
+
 The deployment verifier checks file presence and names only; runtime versions and GPU compatibility still require real execution.
