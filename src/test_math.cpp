@@ -6,9 +6,12 @@
 #include "FgViewportMath.h"
 #include "ExposurePolicy.h"
 #include "PresentHookSlots.h"
+#include "FgDropNotice.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
 #include <cassert>
+#include <mutex>
+#include <thread>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
 static_assert(!frame_math::SceneCamera(true,false,true,false,false));
@@ -111,6 +114,27 @@ int main() {
     assert(hooked.Find(&first[8]) == &original1);
     assert(hooked.Find(&second[8]) == &original2);
     assert(hooked.Find(&second[22]) == nullptr);
+    FgDropNotice dropNotice;
+    int gameChain=0, gameChain1=0, otherChain=0;
+    dropNotice.SetTarget(&gameChain,&gameChain1);
+    {
+        std::mutex renderLock;
+        std::lock_guard<std::mutex> rendering(renderLock);
+        std::thread present([&] {
+            std::unique_lock<std::mutex> lock(renderLock,std::try_to_lock);
+            assert(!lock.owns_lock());
+            dropNotice.Mark(&otherChain);
+            assert(!dropNotice.Consume());
+            dropNotice.Mark(&gameChain);
+            dropNotice.Mark(&gameChain);
+        });
+        present.join();
+        assert(dropNotice.Consume());
+        assert(!dropNotice.Consume());
+    }
+    dropNotice.SetTarget(nullptr);
+    dropNotice.Mark(&gameChain);
+    assert(!dropNotice.Consume());
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);

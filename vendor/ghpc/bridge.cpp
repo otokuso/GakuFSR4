@@ -28,6 +28,7 @@
 #include "../../src/FgRetry.h"
 #include "../../src/FgViewportMath.h"
 #include "../../src/ExposurePolicy.h"
+#include "../../src/FgDropNotice.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -240,6 +241,15 @@ namespace
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+	FgDropNotice g_fgDropNotice;
+
+	void InvalidateSkippedFgPresent()
+	{
+		if (!g_fgDropNotice.Consume()) return;
+		g.fgPending = g.fgHavePrevious = false;
+		g.fgPendingReset = true;
+		g.stats.fgSkipped++;
+	}
 
 	void FgFailure(int stage, const char* name, ffxReturnCode_t code, uint64_t frameId)
 	{
@@ -456,6 +466,7 @@ namespace
 		g.ctx.Reset();
 		g.d11.Reset();
 		g.d11Base = nullptr;
+		g_fgDropNotice.SetTarget(nullptr);
 		g.fgCrossThread = false;
 		g.fgContent = {};
 		g.inValue = g.outValue = 0;
@@ -1357,6 +1368,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	void __stdcall OnRenderEvent(int eventId, void* data)
 	{
 		std::lock_guard<std::mutex> lock(g_renderLock);
+		InvalidateSkippedFgPresent();
 		g.renderThread = GetCurrentThreadId();
 		RunRenderEvent(eventId, data);
 	}
@@ -1399,8 +1411,14 @@ bool FgPresent(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
 bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
 	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
 {
+	if (flags & DXGI_PRESENT_TEST) return false;
 	std::unique_lock<std::mutex> lock(g_renderLock, std::try_to_lock);
-	if (!lock || !g.fgDll || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
+	if (!lock) {
+		g_fgDropNotice.Mark(sc);
+		return false;
+	}
+	InvalidateSkippedFgPresent();
+	if (!g.fgDll || g.fgUnavailable || g.failed || deviceLost) return false;
 	ComPtr<ID3D11Device> device;
 	if (FAILED(sc->GetDevice(IID_PPV_ARGS(&device))) || device.Get() != g.d11Base) return false;
 	DXGI_SWAP_CHAIN_DESC chain{};
@@ -1443,6 +1461,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		return false;
+	}
+	if (!g_fgDropNotice.IsTarget(sc)) {
+		ComPtr<IDXGISwapChain1> extended;
+		ComPtr<IDXGISwapChain> base;
+		IDXGISwapChain* alternate = nullptr;
+		if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&extended)))) alternate = extended.Get();
+		if (alternate == sc && SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&base)))) alternate = base.Get();
+		g_fgDropNotice.SetTarget(sc, alternate);
 	}
 	const ImageRect previous = g.fgContent;
 	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
