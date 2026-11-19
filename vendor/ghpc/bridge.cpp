@@ -138,6 +138,8 @@ namespace
 
 	std::mutex g_ffxMsgLock;
 	std::map<std::string, uint64_t> g_ffxMsgCount;
+	std::mutex g_timerLock;
+	bool g_timerRequested = false;
 
 	void OnFfxMessage(uint32_t type, const wchar_t* message)
 	{
@@ -1487,16 +1489,31 @@ EXPORT int FSR4_Load(const wchar_t* dir)
 
 EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 {
-	if (g.fgDll) return 1;
-	std::wstring d(dir);
-	if (!d.empty() && d.back() != L'\\') d += L'\\';
-	g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 	if (!g.fgDll) {
-		Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
-		return 0;
+		std::wstring d(dir);
+		if (!d.empty() && d.back() != L'\\') d += L'\\';
+		g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+		if (!g.fgDll) {
+			Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
+			return 0;
+		}
 	}
-	timeBeginPeriod(1);
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) {
+		MMRESULT result = timeBeginPeriod(1);
+		if (result == TIMERR_NOERROR) g_timerRequested = true;
+		else Log("FG could not request 1ms timer resolution: %u.", (unsigned)result);
+	}
 	return 1;
+}
+
+EXPORT void FSR4_StopFrameGenerationTimer()
+{
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) return;
+	MMRESULT result = timeEndPeriod(1);
+	if (result == TIMERR_NOERROR) g_timerRequested = false;
+	else Log("FG could not release 1ms timer resolution: %u.", (unsigned)result);
 }
 
 EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
