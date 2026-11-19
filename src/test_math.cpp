@@ -17,6 +17,8 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(std::abs(frame_math::Jitter(0.5f/640,1280,1)-0.5f)<0.00001f);
+    assert(std::abs(frame_math::Jitter(0.5f/640,1280,-1)+0.5f)<0.00001f);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
