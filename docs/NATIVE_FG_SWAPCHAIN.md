@@ -32,6 +32,8 @@ Startup requires a single-sample RGBA8 SDR flip-model swap chain. Unsupported de
 
 The game launched the AMD SwapChain 4.0.0 and FG 4.0.2 on the RX 9070 XT in Quality mode. The title screen displayed correctly after allowing the sRGB view, and the game recreated the buffers on transition from portrait to fullscreen landscape. A ten-second fullscreen live capture showed 595 displayed application intervals and 595 AMD-generated intervals with SyncInterval 0, at about 120 displayed FPS. The native chain used Composed Flip in that capture. A later capture contained 21 independent-flip intervals with tearing allowed, but most frames still used Composed Flip. The public AMD SDK APIs used here do not report whether the driver selected DAFP. The capture proves actual in-game interpolation and records the observed presentation modes.
 
+The F1 runtime panel now shows `DAFP status (diagnostic)` with a live *eligibility* checklist. It never reports "DAFP active": `possible` means the observable constraints (FG frames in the past 2.5 seconds, swapchain major version 4+, SyncInterval 0, fullscreen client coverage) are met. Driver version, actual VRR operation and which pacing path the driver selected remain unverified. Switching VSync or window mode can change eligibility while playing.
+
 ## Hardware result, 2026-11-19
 
 On an RX 9070 XT with Adrenalin 26.11.1 (32.0.32015.16001), Windows 11 build 26300, and the SDK v2.4.0 runtime, both FG runs dispatched 480 interpolated frames. In the middle 6.5 seconds of each PresentMon 2.6.0 capture:
