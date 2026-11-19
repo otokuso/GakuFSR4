@@ -26,6 +26,7 @@
 #include "../../src/FgErrorBurst.h"
 #include "../../src/FgRetry.h"
 #include "../../src/FgViewportMath.h"
+#include "../../src/ExposurePolicy.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -700,7 +701,8 @@ namespace
 		if (rrc == FFX_API_RETURN_OK)
 		{
 			bool req = (rq.required_resources & FFX_API_QUERY_RESOURCE_INPUT_EXPOSURE) != 0;
-			if (req != g.exposureRequired) Log("FSR exposure input %s by this provider: %s.", req ? "required" : "not required", req ? "the game's exposure is handed to it" : "its own auto exposure");
+			if (req != g.exposureRequired) Log("FSR external exposure input %s by this provider; %s.", req ? "required" : "not required",
+				req && !HasExternalExposure(req, fd.exposure) ? "no game exposure is captured, attempting SDK auto exposure" : "using the available exposure mode");
 			g.exposureRequired = req;
 			g.stats.exposureWanted = req ? 1 : 0;
 		}
@@ -1090,7 +1092,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	{
 		if (!g.loaded || g.failed || !handed.color || !handed.depth || !handed.motion || !handed.output) return;
 		FrameData fd = handed;
-		float exposure = !g.exposureRequired || !(handed.exposure > 0) ? 0.0f : handed.exposure;
+		float exposure = HasExternalExposure(g.exposureRequired, handed.exposure) ? handed.exposure : 0.0f;
 		if (exposure > 0) fd.createFlags &= ~(uint32_t)FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
 		float preExposure = 1.0f;
 		// expStep only ever fed a log line that isn't in this build, it's dead weight now.
