@@ -40,6 +40,16 @@ int main() {
     assert(!retry.Ready(2000000));
     retry.NewDevice();
     assert(retry.Ready(0));
+    float prevForward[3]{0,0,1};
+    float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
+    float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
+    float reverseForward[3]{0,0,-1};
+    float zeroForward[3]{};
+    assert(!frame_math::RotationJump(prevForward,prevForward));
+    assert(!frame_math::RotationJump(smoothForward,prevForward));
+    assert(frame_math::RotationJump(jumpForward,prevForward));
+    assert(frame_math::RotationJump(reverseForward,prevForward));
+    assert(frame_math::RotationJump(prevForward,zeroForward));
     FgErrorBurst fgErrors;
     assert(fgErrors.Record(1, 7));
     assert(fgErrors.Record(1, 7));
