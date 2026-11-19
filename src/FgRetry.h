@@ -36,8 +36,9 @@ struct FgRetry
     void ObserveBackbuffer(uint32_t w, uint32_t h)
     {
         if (!w || !h || (w == backbufferW && h == backbufferH)) return;
+        const bool resized = backbufferW && backbufferH;
         backbufferW = w; backbufferH = h;
-        if (!permanent) Recovered();
+        if (resized && !permanent) Recovered();
     }
 
     bool Ready(uint64_t nowMs) const

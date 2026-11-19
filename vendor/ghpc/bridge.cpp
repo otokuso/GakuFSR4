@@ -1284,12 +1284,13 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
 {
 	std::unique_lock<std::mutex> lock(g_renderLock, std::try_to_lock);
-	if (!lock || !g.fg || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
+	if (!lock || !g.fgDll || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
 	ComPtr<ID3D11Device> device;
 	if (FAILED(sc->GetDevice(IID_PPV_ARGS(&device))) || device.Get() != g.d11Base) return false;
 	DXGI_SWAP_CHAIN_DESC chain{};
 	if (FAILED(sc->GetDesc(&chain)) || !chain.OutputWindow || !IsPresentWindow(chain.OutputWindow)) return false;
 	g.fgRetry.ObserveBackbuffer(chain.BufferDesc.Width, chain.BufferDesc.Height);
+	if (!g.fg) return false;
 	if (!g.fgPending || sync > 4 || (flags & ~DXGI_PRESENT_ALLOW_TEARING) ||
 		(parameters && (parameters->DirtyRectsCount || parameters->pScrollRect || parameters->pScrollOffset)))
 	{

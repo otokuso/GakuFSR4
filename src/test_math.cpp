@@ -28,6 +28,8 @@ int main() {
         if (n<FgRetry::MaxFailures) assert(retry.Ready(1000+delay));
     }
     assert(!retry.Ready(1000000)); // bounded retries
+    retry.ObserveBackbuffer(1920,1080);
+    assert(!retry.Ready(1000000)); // first observation only sets the baseline
     retry.ObserveBackbuffer(1600,900); // resize re-enables the FG path
     assert(retry.Ready(1000000));
     retry.Failed(1000000, true); // unsupported provider is permanent for the device
