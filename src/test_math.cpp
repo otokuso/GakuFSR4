@@ -1,5 +1,6 @@
 #include "FrameMath.h"
 #include "Preset.h"
+#include "TestHalfFloat.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
@@ -17,6 +18,10 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(TestFloatToHalf(1.0f)==0x3c00u);
+    assert(TestFloatToHalf(-1.0f)==0xbc00u);
+    assert(TestFloatToHalf(0.5f)==0x3800u);
+    assert(TestFloatToHalf(0.0f)==0);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
