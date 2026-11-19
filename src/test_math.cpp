@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "PresentRate.h"
 #include "RenderWorkQueue.h"
 #include "FsrProvider.h"
 #include "FgErrorBurst.h"
@@ -39,6 +40,15 @@ static_assert(frame_math::FsrInputIsHdr(true,true,false));
 static_assert(!frame_math::FsrInputIsHdr(true,false,false));
 static_assert(!frame_math::FsrInputIsHdr(false,false,true));
 int main() {
+    PresentRate fps;
+    fps.Sample(100,{0,0});
+    assert(!fps.ready);
+    fps.Sample(1100,{60,60});
+    assert(fps.ready && fps.realFps==60 && fps.totalFps==120);
+    fps.Sample(2100,{120,60});
+    assert(fps.ready && fps.realFps==60 && fps.totalFps==60);
+    fps.Sample(6100,{300,60});
+    assert(!fps.ready);
     ResourceLifetime oldTextures, newTextures;
     oldTextures.Begin();
     oldTextures.Begin();

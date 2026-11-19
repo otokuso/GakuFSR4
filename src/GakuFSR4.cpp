@@ -804,7 +804,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(configEarlyNativeAA && !nativeAaBeforePost)
         Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the normal FSR path",GAKU_LOG_WARNING);
     const bool nativeSwapchain=GetPrivateProfileIntW(L"FSR4",L"NativeSwapChain",0,config.c_str())==1;
-    if(frameGeneration&&!CaptureGameSwapChain(hooks,nativeSwapchain))
+    if(!CaptureGameSwapChain(hooks,frameGeneration&&nativeSwapchain))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
 }
