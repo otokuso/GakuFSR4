@@ -1,0 +1,32 @@
+name: Windows build and tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure x64 with MSVC
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config ${{ matrix.configuration }} --parallel
+      - name: Check plugin output
+        shell: pwsh
+        run: |
+          if (!(Test-Path "build/${{ matrix.configuration }}/GakuFSR4.dll" -PathType Leaf)) {
+            throw "GakuFSR4.dll was not produced by the build"
+          }
+      - name: Run non-GPU tests (including plugin ABI/UI)
+        run: ctest --test-dir build -C ${{ matrix.configuration }} --output-on-failure
+
+  # test_gpu requires the supported Radeon device, the signed AMD runtime,
+  # and a real graphics session. See docs/GPU_TESTING.md for manual coverage.

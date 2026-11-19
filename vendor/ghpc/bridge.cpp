@@ -20,6 +20,8 @@
 #include "dx12/ffx_api_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
+#include "../../src/BridgeStats.h"
+#include "../../src/FgErrorBurst.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -50,44 +52,6 @@ struct FrameData
 	void* hudless;
 	uint32_t fg;
 	float camPos[3], camUp[3], camRight[3], camFwd[3];
-};
-
-struct Stats
-{
-	uint64_t frames;
-	uint64_t providerId;
-	int32_t lastResult;
-	int32_t failed;
-	char provider[64];
-	char adapter[128];
-	uint64_t presented;
-	float cpuMs;
-	float gpuMs;
-	uint64_t fsrMemory;
-	uint64_t logDropped;
-	uint32_t bridgeStarts;
-	uint32_t contextStarts;
-	int32_t removedReason;
-	uint32_t failures;
-	// gpuPeriodMs down to markMs stay at zero in this build, nothing fills them. Left in so the layout still matches Native.cs.
-	float gpuPeriodMs, gpuPeriodMin, gpuPeriodMax;
-	float gpuBusyMs, gpuBusyMin, gpuBusyMax;
-	uint64_t gpuFrames;
-	uint64_t gpuDisjoint;
-	uint64_t gpuDropped;
-	float markMs[48];
-	float flushMs;
-	uint32_t exposureWanted;
-	uint64_t directFrames;
-	char fgProvider[64];
-	uint64_t fgProviderId, fgPrepared, fgGenerated, fgReal, fgSkipped, fgMemory;
-	int32_t fgLastResult;
-	float fgGpuMs, fgPaceMs, fgIntervalMs;
-	float fgHookMs;
-	float fgRefreshHz;
-	uint64_t fgNotNeeded;
-	uint64_t presentsHooked;
-	uint64_t fgHudless;
 };
 
 static_assert(sizeof(void*) == 8, "64-bit only");
@@ -138,6 +102,8 @@ namespace
 
 	std::mutex g_ffxMsgLock;
 	std::map<std::string, uint64_t> g_ffxMsgCount;
+	std::mutex g_timerLock;
+	bool g_timerRequested = false;
 
 	void OnFfxMessage(uint32_t type, const wchar_t* message)
 	{
@@ -254,15 +220,28 @@ namespace
 		bool fgPending = false;
 		bool fgPendingReset = false;
 		bool fgHavePrevious = false;
-		int fgErrors = 0;
+		FgErrorBurst fgErrors;
 		LONGLONG fgLastEntry = 0;
 		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
 		bool fgOffLogged = true;
+		uint32_t fgPaceSamples = 0;
+		double fgPaceBusyMs = 0, fgPaceBusyMaxMs = 0, fgPaceLateMs = 0, fgPaceLateMaxMs = 0;
 	};
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+
+	void FgFailure(int stage, const char* name, ffxReturnCode_t code, uint64_t frameId)
+	{
+		if (g.fgErrors.Record(stage, (uint32_t)code))
+			Log("FG %s failed: %u (frame %llu).", name, (unsigned)code, (unsigned long long)frameId);
+	}
+
+	void FgRecovered()
+	{
+		g.fgErrors.Reset();
+	}
 
 	std::mutex g_statsLock;
 	Stats g_published = {};
@@ -368,6 +347,7 @@ namespace
 
 	void DestroyFg()
 	{
+		FgRecovered();
 		if (g.fg && g.fx.DestroyContext)
 		{
 			ffxConfigureDescFrameGeneration c = {};
@@ -385,6 +365,8 @@ namespace
 		g.fgPending = g.fgHavePrevious = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
+		g.fgPaceSamples = 0;
+		g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		g.stats.fgProviderId = 0;
 		g.stats.fgProvider[0] = 0;
 		g.stats.fgMemory = 0;
@@ -1013,7 +995,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		c.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
 		c.frameID = id;
 		ffxReturnCode_t rc = g.fx.Configure(&g.fg, &c.header);
-		if (rc != FFX_API_RETURN_OK) { if (++g.fgErrors <= 3) Log("FG configure failed: %u (frame %llu).", rc, (unsigned long long)id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) { FgFailure(1, "configure", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 		p.frameID = id;
@@ -1035,7 +1017,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		memcpy(p.cameraRight, fd.camRight, sizeof p.cameraRight);
 		memcpy(p.cameraForward, fd.camFwd, sizeof p.cameraForward);
 		rc = g.fx.Dispatch(&g.fg, &p.header);
-		if (rc != FFX_API_RETURN_OK) { if (++g.fgErrors <= 3) Log("FG prepare failed: %u (frame %llu).", rc, (unsigned long long)id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) { FgFailure(2, "prepare", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
 		g.stats.fgPrepared++;
 		g.fgPending = true;
 		g.fgPendingReset = p.reset;
@@ -1047,13 +1029,31 @@ void main(uint3 id : SV_DispatchThreadID)
 		LARGE_INTEGER f, now;
 		QueryPerformanceFrequency(&f);
 		LONGLONG until = from + (LONGLONG)(ms * f.QuadPart / 1000.0);
+		LONGLONG busyStart = 0;
 		for (;;)
 		{
 			QueryPerformanceCounter(&now);
 			LONGLONG left = until - now.QuadPart;
-			if (left <= 0) return;
+			if (left <= 0) break;
 			if (left * 1000.0 / f.QuadPart > 1.5) Sleep(1);
-			else YieldProcessor();
+			else {
+				if (!busyStart) busyStart = now.QuadPart;
+				YieldProcessor();
+			}
+		}
+		// Sample existing behavior before changing the wait strategy; no extra sleeps or yields.
+		const double msPerTick = 1000.0 / f.QuadPart;
+		const double busyMs = busyStart ? (now.QuadPart - busyStart) * msPerTick : 0.0;
+		const double lateMs = (now.QuadPart - until) * msPerTick;
+		g.fgPaceBusyMs += busyMs;
+		g.fgPaceLateMs += lateMs;
+		g.fgPaceBusyMaxMs = max(g.fgPaceBusyMaxMs, busyMs);
+		g.fgPaceLateMaxMs = max(g.fgPaceLateMaxMs, lateMs);
+		if (++g.fgPaceSamples == 600) {
+			Log("FG manual Pace over 600 waits: avg busy-spin %.3f ms, max %.3f ms; avg deadline overshoot %.3f ms, max %.3f ms. Compare with CPU usage and PresentMon.",
+				g.fgPaceBusyMs / 600, g.fgPaceBusyMaxMs, g.fgPaceLateMs / 600, g.fgPaceLateMaxMs);
+			g.fgPaceSamples = 0;
+			g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		}
 	}
 
@@ -1418,13 +1418,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!Check(g.ctx->Wait(g.out11.Get(), done), "D3D11 Wait (FG)")) { Fail("fence (above)."); return false; }
 	if (rc != FFX_API_RETURN_OK)
 	{
-		if (++g.fgErrors <= 3) Log("FG dispatch failed: %u (frame %llu).", rc, (unsigned long long)g.fgFrameId);
+		FgFailure(3, "dispatch", rc, g.fgFrameId);
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		CheckRemoved();
 		return false;
 	}
 	g.fgHavePrevious = true;
+	FgRecovered();
 	if (!showGenerated || !d.numGeneratedFrames) { g.stats.fgSkipped++; return false; }
 
 	g.ctx->CopyResource(bb.Get(), g.gen.t11.Get());
@@ -1460,7 +1461,12 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	{
 		g.ctx->CopyResource(bb2.Get(), g.present.t11.Get());
 		*hr = original(sc, realSync, pairFlags, parameters);
-		g.stats.fgReal++;
+		if (SUCCEEDED(*hr)) g.stats.fgReal++;
+		else
+		{
+			g.fgHavePrevious = false;
+			Log("FG real frame Present failed: 0x%08X.", (unsigned)*hr);
+		}
 	}
 	else *hr = DXGI_ERROR_INVALID_CALL;
 	LARGE_INTEGER t3;
@@ -1487,16 +1493,31 @@ EXPORT int FSR4_Load(const wchar_t* dir)
 
 EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 {
-	if (g.fgDll) return 1;
-	std::wstring d(dir);
-	if (!d.empty() && d.back() != L'\\') d += L'\\';
-	g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 	if (!g.fgDll) {
-		Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
-		return 0;
+		std::wstring d(dir);
+		if (!d.empty() && d.back() != L'\\') d += L'\\';
+		g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+		if (!g.fgDll) {
+			Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
+			return 0;
+		}
 	}
-	timeBeginPeriod(1);
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) {
+		MMRESULT result = timeBeginPeriod(1);
+		if (result == TIMERR_NOERROR) g_timerRequested = true;
+		else Log("FG could not request 1ms timer resolution: %u.", (unsigned)result);
+	}
 	return 1;
+}
+
+EXPORT void FSR4_StopFrameGenerationTimer()
+{
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) return;
+	MMRESULT result = timeEndPeriod(1);
+	if (result == TIMERR_NOERROR) g_timerRequested = false;
+	else Log("FG could not release 1ms timer resolution: %u.", (unsigned)result);
 }
 
 EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
