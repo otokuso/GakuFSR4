@@ -23,6 +23,7 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
 bool frameGeneration=false;
+bool nativeAaBeforePost=false;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -297,6 +298,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     static int blockedCamera=0,retryFrame=0;
     int frame=0,id=0;
     const bool offscreen=At<P>(cd,field.target)!=nullptr;
+    const bool earlyNativeAA=frame_math::EarlyNativeAA(nativeAaBeforePost,offscreen,ratio);
     const char* stage="camera validation";
     try {
         frame=api.Value<int>(method.frame);
@@ -304,7 +306,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         if(frame!=configuredFrame||std::find(configuredCameras.begin(),configuredCameras.end(),id)==configuredCameras.end()) {
             originalTaa(cmd,material,cd,src,dst,motion,mi);return;
         }
-        if(offscreen && (!frame_math::RetryCamera(id,blockedCamera,frame,retryFrame) ||
+        if((offscreen || earlyNativeAA) && (!frame_math::RetryCamera(id,blockedCamera,frame,retryFrame) ||
             !src || !dst || !LiveTexture(At<P>(src,field.rt)) ||
             !LiveTexture(At<P>(dst,field.rt)) || !LiveTexture(motion))) {
             originalTaa(cmd,material,cd,src,dst,motion,mi);
@@ -318,7 +320,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         capture.id=id;
         capture.jitterX=frame_math::Jitter(matrix[12],w);
         capture.jitterY=frame_math::Jitter(matrix[13],h);
-        if(offscreen && ratio==1.0f) {
+        if((offscreen || earlyNativeAA) && ratio==1.0f) {
             if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
                 originalTaa(cmd,material,cd,src,dst,motion,mi);
                 return;
@@ -333,12 +335,15 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
             QueueFrame(cmd,cd,w,h,w,h);
             stage="copy FSR output";
             BlitCamera(cmd,resources.output.handle.Get(),dst);
+            if(earlyNativeAA) capture.frame=-1; // Later FinalPass must not dispatch FSR a second time.
             if(blockedCamera==id && retryFrame>0) {
                 retryFrame=0;
                 Log("Resumed FSR 4 Native AA after a frame fallback");
             }
             static bool queued=false;
-            if(!queued) { queued=true; Log("Queued first FSR 4 Native AA frame in the TAA pass"); }
+            if(!queued) { queued=true; Log(earlyNativeAA ?
+                "Queued first screen NativeAA frame before post-processing" :
+                "Queued first FSR 4 Native AA frame in the TAA pass"); }
         } else {
             BlitCamera(cmd,src,dst);
         }
@@ -346,7 +351,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         if(!reported) { reported=true; Log("Captured first camera motion vectors and jitter"); }
         return;
     } catch(const ManagedFailure& e) {
-        if(offscreen && id!=0) {
+        if((offscreen || earlyNativeAA) && id!=0) {
             blockedCamera=id;
             retryFrame=frame+30;
             history.frame=-1;
@@ -586,6 +591,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
+    const bool configEarlyNativeAA=GetPrivateProfileIntW(L"FSR4",L"NativeAABeforePost",0,config.c_str())!=0;
     wchar_t value[64];
     wchar_t* end=nullptr;
     if(GetPrivateProfileStringW(L"FSR4",L"Preset",L"",value,64,config.c_str())) {
@@ -606,6 +612,9 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
+    nativeAaBeforePost=configEarlyNativeAA && ratio==1.0f;
+    if(configEarlyNativeAA && !nativeAaBeforePost)
+        Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the existing final-pass FSR path",GAKU_LOG_WARNING);
     if(frameGeneration&&!CaptureGameSwapChain(hooks))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
