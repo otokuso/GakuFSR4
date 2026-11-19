@@ -211,6 +211,8 @@ namespace
 		bool fgUnavailable = false;
 		FgRetry fgRetry;
 		ImageRect fgContent{};
+		bool fgViewportOverrideEnabled = false;
+		ImageRect fgViewportOverride{};
 		UINT fgSceneW = 0, fgSceneH = 0;
 		Shared present, gen, fgColor, fgOutput;
 		ComPtr<ID3D12RootSignature> scaleRs;
@@ -1332,7 +1334,19 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		g.fgContent = {};
 		return false;
 	}
-	const ImageRect content = FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
+	const ImageRect content = g.fgViewportOverrideEnabled ? g.fgViewportOverride :
+		FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
+	if (g.fgViewportOverrideEnabled && !FgViewportWithinBackbuffer(content, bd.Width, bd.Height, g.fgSceneW, g.fgSceneH)) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			Log("FG viewport override %u,%u %ux%u is outside the %ux%u backbuffer or mismatches the %ux%u scene; skipping FG.",
+				content.x,content.y,content.width,content.height,bd.Width,bd.Height,g.fgSceneW,g.fgSceneH);
+		}
+		g.stats.fgSkipped++;
+		g.fgHavePrevious = false;
+		return false;
+	}
 	const ImageRect previous = g.fgContent;
 	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
 	const bool scaled = letterboxed || bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
@@ -1341,7 +1355,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		previous.width != content.width || previous.height != content.height)
 	{
 		if (letterboxed)
-			Log("FG centered viewport: %u,%u %ux%u in %ux%u.", content.x, content.y, content.width, content.height, bd.Width, bd.Height);
+			Log("FG %s viewport: %u,%u %ux%u in %ux%u.", g.fgViewportOverrideEnabled ? "configured" : "centered", content.x, content.y, content.width, content.height, bd.Width, bd.Height);
 		if (previous.width) {
 			g.fgHavePrevious = false;
 			g.stats.fgSkipped++;
@@ -1567,6 +1581,13 @@ EXPORT void FSR4_StopFrameGenerationTimer()
 	MMRESULT result = timeEndPeriod(1);
 	if (result == TIMERR_NOERROR) g_timerRequested = false;
 	else Log("FG could not release 1ms timer resolution: %u.", (unsigned)result);
+}
+
+EXPORT void FSR4_SetFgViewportOverride(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	g.fgViewportOverride = {x,y,width,height};
+	g.fgViewportOverrideEnabled = width && height;
 }
 
 EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }

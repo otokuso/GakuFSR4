@@ -13,6 +13,7 @@ The GitHub Actions `windows-ci.yml` workflow builds Debug and Release on Windows
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-scaled
    .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-letterbox
+   .\build\Release\test_gpu.exe .\build\Release\GakuFSR4.dll C:\AMD-FSR-runtime --fg-offset
    ```
 
 4. In a game installation with GakuLoader, check deployment file paths:

@@ -37,7 +37,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool dynamic=argc==4&&wcscmp(argv[3],L"--dynamic")==0;
     const bool fgScaled=argc==4&&wcscmp(argv[3],L"--fg-scaled")==0;
     const bool fgLetterbox=argc==4&&wcscmp(argv[3],L"--fg-letterbox")==0;
-    const bool fgCross=argc==4&&wcscmp(argv[3],L"--fg-cross")==0;
+    const bool fgOffset=argc==4&&wcscmp(argv[3],L"--fg-offset")==0;
+    const bool fgCross=fgOffset||(argc==4&&wcscmp(argv[3],L"--fg-cross")==0);
     const bool fgResized=fgScaled||fgLetterbox||fgCross;
     const bool fg=fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||fgCross||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
@@ -51,6 +52,12 @@ int wmain(int argc,wchar_t** argv) {
     if(!load||!event||!stats||!poll||!load(argv[2])) return 4;
     auto loadFg=reinterpret_cast<int(*)(const wchar_t*)>(GetProcAddress(dll,"FSR4_LoadFrameGeneration"));
     if(fg&&(!loadFg||!loadFg(argv[2]))) return 4;
+    if(fgOffset) {
+        auto setViewport=reinterpret_cast<void(*)(uint32_t,uint32_t,uint32_t,uint32_t)>(
+            GetProcAddress(dll,"FSR4_SetFgViewportOverride"));
+        if(!setViewport) return 4;
+        setViewport(50,0,608,1080);
+    }
     puts("GPU test: AMD runtime loaded");
     try {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> ctx;
@@ -160,7 +167,8 @@ int wmain(int argc,wchar_t** argv) {
             puts(log);
             reducedFgSize|=strstr(log,"FG context: inputs up to 1440x2560, display 1440x2560")!=nullptr;
             letterboxViewport|=strstr(log,"FG centered viewport: 0,131 1920x817 in 1920x1080.")!=nullptr;
-            crossViewport|=strstr(log,"FG centered viewport: 656,0 608x1080 in 1920x1080.")!=nullptr;
+            crossViewport|=strstr(log,fgOffset ? "FG configured viewport: 50,0 608x1080 in 1920x1080." :
+                "FG centered viewport: 656,0 608x1080 in 1920x1080.")!=nullptr;
             synchronizedPair|=strstr(log,"FG synchronizes flip-model frame pairs to vblank.")!=nullptr;
         }
         Stats s{};stats(&s);

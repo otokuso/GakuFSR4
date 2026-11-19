@@ -642,6 +642,23 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
+    if(frameGeneration) {
+        const auto readViewport=[&](const wchar_t* name) {
+            wchar_t text[32]{};
+            const auto count=GetPrivateProfileStringW(L"FSR4",name,L"0",text,32,config.c_str());
+            wchar_t* end=nullptr;
+            const long value=wcstol(text,&end,10);
+            return count<31 && end!=text && !*end && value>=0 && value<=16384 ? value : -1L;
+        };
+        const auto x=readViewport(L"FGViewportX"), y=readViewport(L"FGViewportY");
+        const auto w=readViewport(L"FGViewportW"), h=readViewport(L"FGViewportH");
+        if(x<0||y<0||w<0||h<0||((w==0)!=(h==0))||(!w&&(x||y))) {
+            Log("Invalid FGViewport override; skipping frame generation",GAKU_LOG_WARNING);
+            frameGeneration=false;
+        } else {
+            FSR4_SetFgViewportOverride(x,y,w,h);
+        }
+    }
     if(frameGeneration&&!CaptureGameSwapChain(hooks))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
