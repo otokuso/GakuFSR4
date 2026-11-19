@@ -584,6 +584,18 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         return GAKU_E_UNAVAILABLE;
     dataPath=std::wstring(runtime.localRoot)+L"\\PluginData\\gakufsr4";
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
+    const int viewportX=GetPrivateProfileIntW(L"FSR4",L"FGViewportX",0,config.c_str());
+    const int viewportY=GetPrivateProfileIntW(L"FSR4",L"FGViewportY",0,config.c_str());
+    const int viewportW=GetPrivateProfileIntW(L"FSR4",L"FGViewportW",0,config.c_str());
+    const int viewportH=GetPrivateProfileIntW(L"FSR4",L"FGViewportH",0,config.c_str());
+    if(viewportX<0||viewportY<0||viewportW<0||viewportH<0||((viewportW==0)!=(viewportH==0))||
+       (!viewportW&&(viewportX||viewportY))) {
+        Log("Invalid FGViewport override; specify nonnegative X/Y and both W/H, or omit all four",GAKU_LOG_ERROR);
+        return GAKU_E_INVALID_ARGUMENT;
+    }
+    FSR4_SetFgViewportOverride(viewportX,viewportY,viewportW,viewportH);
+    if(viewportW&&viewportH) Log("Experimental FG viewport override: "+std::to_string(viewportX)+","+std::to_string(viewportY)+
+        " "+std::to_string(viewportW)+"x"+std::to_string(viewportH));
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];
