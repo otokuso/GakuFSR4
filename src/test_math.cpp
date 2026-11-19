@@ -1,5 +1,6 @@
 #include "FrameMath.h"
 #include "FgErrorBurst.h"
+#include "FgRetry.h"
 #include "MipBias.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
@@ -20,6 +21,25 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    FgRetry retry;
+    retry.ObserveScene(1920,1080,1280,720);
+    assert(retry.Ready(0));
+    for (uint32_t n=1; n<=FgRetry::MaxFailures; ++n) {
+        uint32_t delay=retry.Failed(1000, false);
+        assert(delay==(n==FgRetry::MaxFailures ? 0u : (500u << (n-1))));
+        assert(!retry.Ready(1000+delay-1));
+        if (n<FgRetry::MaxFailures) assert(retry.Ready(1000+delay));
+    }
+    assert(!retry.Ready(1000000)); // bounded retries
+    retry.ObserveBackbuffer(1920,1080);
+    assert(!retry.Ready(1000000)); // first observation only sets the baseline
+    retry.ObserveBackbuffer(1600,900); // resize re-enables the FG path
+    assert(retry.Ready(1000000));
+    retry.Failed(1000000, true); // unsupported provider is permanent for the device
+    retry.ObserveScene(1080,1920,720,1280);
+    assert(!retry.Ready(2000000));
+    retry.NewDevice();
+    assert(retry.Ready(0));
     float prevForward[3]{0,0,1};
     float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
     float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
