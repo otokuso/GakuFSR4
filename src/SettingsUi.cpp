@@ -8,6 +8,7 @@
 #include "SettingsUi.h"
 
 extern "C" void FSR4_GetStats(Stats* out);
+extern "C" const char* FSR4_GetLastFgSkipReason();
 
 namespace gakufsr {
 namespace {
@@ -69,9 +70,11 @@ void DrawSettings(void*) {
     ImGui::TextUnformatted(saveMessage?saveMessage:"Saved settings take effect after restarting the game.");
 
     if (ImGui::CollapsingHeader("Runtime diagnostics",ImGuiTreeNodeFlags_DefaultOpen)) {
+        static const char* lastFgSkip=nullptr;
         ULONGLONG now=GetTickCount64();
         if (!lastStatsRead || now-lastStatsRead>=2000) {
             FSR4_GetStats(&currentStats);
+            lastFgSkip=FSR4_GetLastFgSkipReason();
             lastStatsRead=now;
         }
         const Stats& s=currentStats;
@@ -91,8 +94,8 @@ void DrawSettings(void*) {
                 (unsigned long long)s.fgSkipped,(unsigned long long)s.fgNotNeeded);
             ImGui::Text("FG interval: %.2f ms, pacing: %.2f ms",s.fgIntervalMs,s.fgPaceMs);
             ImGui::Text("FG last dispatch result: %d",s.fgLastResult);
-            if (!s.fgProvider[0]) ImGui::TextDisabled("If FG is enabled, check the GakuLoader log for the reason.");
         }
+        if(lastFgSkip) ImGui::TextWrapped("Last FG skip: %s",lastFgSkip);
         ImGui::TextDisabled("Snapshot refreshes every 2 seconds; some GPU timing values are rolling averages.");
     }
     ImGui::SetCurrentContext(previous);

@@ -195,6 +195,9 @@ int wmain(int argc,wchar_t** argv) {
         printf("frames=%llu, provider=%s, result=%d, failed=%d\n",s.frames,s.provider,s.lastResult,s.failed);
         if(s.frames!=frameCount||s.failed||s.lastResult||strncmp(s.provider,"4.",2)) return 5;
         if(fg) {
+            auto skipReason=reinterpret_cast<const char*(*)()>(GetProcAddress(dll,"FSR4_GetLastFgSkipReason"));
+            const char* reason=skipReason?skipReason():nullptr;
+            if(!reason || strcmp(reason,"History reset or first frame")) return 11;
             printf("FG provider=%s, prepared=%llu, generated=%llu, real=%llu, Presents/frame=%u,%u,%u,%u,%u\n",
                 s.fgProvider,s.fgPrepared,s.fgGenerated,s.fgReal,
                 presentCalls[0],presentCalls[1],presentCalls[2],presentCalls[3],presentCalls[4]);
