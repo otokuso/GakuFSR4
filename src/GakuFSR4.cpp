@@ -6,7 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
-#include "ResourceLifetime.h"
+#include "RenderWorkQueue.h"
 #include "MipBias.h"
 #include "PrimaryCamera.h"
 #include "TaaJitter.h"
@@ -25,7 +25,7 @@ GakuLogService logService{};
 GakuRuntimeService runtime{};
 GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
-bool bound=false, attempted=false;
+bool attempted=false;
 bool frameGeneration=false;
 bool fsrJitterCycle=false;
 int motionVectorYSign=-1;
@@ -34,11 +34,19 @@ bool nativeAaBeforePost=false;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
+struct Packet {
+    FrameData data{};
+    std::array<ComPtr<ID3D11Resource>,4> textures;
+};
+// Unity may still call a completion event after plugin shutdown.
+RenderWorkQueue<Packet,32>& renderWork=*new RenderWorkQueue<Packet,32>;
+
 void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
     if (logService.write) logService.write(logService.context,level,("[GakuFSR4] "+text).c_str());
 }
 void Stop(const std::string& why) {
     enabled=false;
+    renderWork.CancelPackets();
     FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
@@ -184,6 +192,7 @@ struct Surfaces {
     }
 };
 struct Resources : Surfaces {
+    static constexpr std::size_t maxRetired=3;
     std::unique_ptr<ResourceLifetime> lifetime=std::make_unique<ResourceLifetime>();
     struct Retired {
         Surfaces surfaces;
@@ -206,6 +215,8 @@ struct Resources : Surfaces {
         if(w==rw&&h==rh&&dw==displayW&&dh==displayH) return;
         Reap();
         if(lifetime->InUse()) {
+            if(retired.size()>=maxRetired)
+                throw std::runtime_error("Too many old RTHandle sets still have queued render commands");
             // Allocate before moving ownership so allocation failure leaves the old roots intact.
             auto next=std::make_unique<ResourceLifetime>();
             auto& old=retired.emplace_back();
@@ -223,28 +234,24 @@ struct Resources : Surfaces {
 };
 // The plugin is process-resident; never invoke IL2CPP from a CRT/DLL detach destructor.
 Resources& resources=*new Resources;
-std::atomic<unsigned> pendingResourceUses{0};
-void __stdcall CompleteResourceUse(int,P data) {
-    static_cast<ResourceLifetime*>(data)->Complete();
-    pendingResourceUses.fetch_sub(1,std::memory_order_release);
+void __stdcall CompleteResourceUse(int eventId,P data) {
+    if(eventId==2) renderWork.Complete(reinterpret_cast<std::uintptr_t>(data));
 }
 struct ResourceUse {
     P cmd=nullptr;
-    ResourceLifetime* lifetime=nullptr;
+    std::uintptr_t id=0;
     void Begin(P commandBuffer) {
-        if(pendingResourceUses.load(std::memory_order_acquire)>=32)
+        id=renderWork.Begin(*resources.lifetime);
+        if(!id)
             throw std::runtime_error("Render resource completion events are not being consumed");
         cmd=commandBuffer;
-        lifetime=resources.lifetime.get();
-        lifetime->Begin();
-        pendingResourceUses.fetch_add(1,std::memory_order_relaxed);
     }
     ~ResourceUse() {
-        if(!lifetime) return;
+        if(!id) return;
         try {
             // Place the marker after Unity has recorded the last use of the output.
             QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
-                reinterpret_cast<P>(&CompleteResourceUse),2,lifetime);
+                reinterpret_cast<P>(&CompleteResourceUse),2,reinterpret_cast<P>(id));
         } catch(...) {
             // A lost marker cannot safely be treated as completion.
             renderFailed=true;
@@ -272,7 +279,7 @@ struct History {
     int frame=-1,id=0,w=0,h=0;
     float fov=0,pos[3]{},forward[3]{};
 } history;
-std::atomic<uint64_t> submitted{0}, completed{0};
+std::atomic<uint64_t> completed{0};
 int configuredFrame=-1;
 std::vector<int> configuredCameras;
 PrimaryCamera primaryCamera;
@@ -302,13 +309,10 @@ void Blit(P cmd,P texture,P destination,bool globalDepth=false) {
     api.Invoke(method.blit,cmd,{src.data(),dst.data()});
 }
 
-struct Packet {
-    FrameData data{};
-    std::array<ComPtr<ID3D11Resource>,4> textures;
-};
 void __stdcall RenderEvent(int eventId,P data) {
-    std::unique_ptr<Packet> packet(static_cast<Packet*>(data));
-    if(eventId!=1||!packet) return;
+    if(eventId!=1) return;
+    auto packet=renderWork.Take(reinterpret_cast<std::uintptr_t>(data));
+    if(!packet) return;
     OnRenderEvent(1,&packet->data);
     FSR4_ViewsInUse(0);
     Stats stats{}; FSR4_GetStats(&stats);
@@ -372,7 +376,7 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 
-void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh,bool beforePost=false);
+void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool beforePost=false);
 
 bool LiveTexture(P texture) {
     return texture && At<P>(texture,field.objectPtr);
@@ -423,7 +427,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
             stage="copy scene color";
             BlitCamera(cmd,src,resources.color.handle.Get());
             stage="queue FSR frame";
-            QueueFrame(cmd,cd,w,h,w,h,earlyNativeAA);
+            QueueFrame(use,cd,w,h,w,h,earlyNativeAA);
             stage="copy FSR output";
             BlitCamera(cmd,resources.output.handle.Get(),dst);
             capture.earlyNativeAA=earlyNativeAA;
@@ -458,7 +462,8 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     originalTaa(cmd,material,cd,src,dst,motion,mi);
 }
 
-void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh,bool beforePost) {
+void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool beforePost) {
+    P cmd=use.cmd;
     Blit(cmd,nullptr,resources.depth.texture.Get(),true);
     Blit(cmd,capture.motion.Get(),resources.motion.texture.Get());
     // A failed FSR dispatch leaves a valid spatially scaled frame, never uninitialized memory.
@@ -505,9 +510,14 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh,bool beforePost) {
             std::copy(axis.begin(),axis.end(),dst);
         }
     }
-    QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
-        reinterpret_cast<P>(&RenderEvent),1,packet.get());
-    packet.release();submitted.fetch_add(1);
+    if(!renderWork.Attach(use.id,std::move(packet))) return;
+    try {
+        QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
+            reinterpret_cast<P>(&RenderEvent),1,reinterpret_cast<P>(use.id));
+    } catch(...) {
+        renderWork.Take(use.id);
+        throw;
+    }
     history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
     std::copy(pos.begin(),pos.end(),history.pos);
     std::copy(forward.begin(),forward.end(),history.forward);
@@ -548,7 +558,7 @@ void Final(P self,P cmd,P rd,M mi) {
                 resources.Ensure(w,h,dw,dh);
                 use.Begin(cmd);
                 BlitCamera(cmd,source,resources.color.handle.Get());
-                QueueFrame(cmd,cd,w,h,dw,dh);
+                QueueFrame(use,cd,w,h,dw,dh);
                 output=resources.output.handle.Get();
             }
 
@@ -586,7 +596,7 @@ void ResolveBlit(P cmd,P cd,P src,P dst,int load,int store,P material,int pass,M
                 resources.Ensure(w,h,dw,dh);
                 use.Begin(cmd);
                 BlitCamera(cmd,src,resources.color.handle.Get());
-                QueueFrame(cmd,cd,w,h,dw,dh);
+                QueueFrame(use,cd,w,h,dw,dh);
                 input=resources.output.handle.Get();
                 capture.frame=-1;
                 static bool reported=false;
@@ -696,7 +706,6 @@ void Bind() {
     if(hooks.acquireBatch(hooks.context,4,requests)!=GAKU_OK) throw std::runtime_error("Could not acquire URP hook batch");
     Log("URP hooks installed. FSR 4 upscale ratio "+std::to_string(ratio)+
         (frameGeneration?". Frame generation enabled.":". Frame generation disabled."));
-    bound=true;
 }
 
 GakuStatus Activate(const GakuHostApi* host,P* state) {
@@ -814,17 +823,18 @@ void Tick(P,float) {
                 Log(std::string("FSR Frame Generation active: ")+stats.fgProvider);
             }
         }
-        if(bound&&enabled&&submitted.load()>completed.load()+32) Stop("Render event is not being consumed");
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 void Shutdown(P) {
     enabled=false;
+    renderWork.CancelPackets();
     FSR4_StopFrameGenerationTimer();
     primaryCamera.Reset();
     capture.camera.Clear();capture.motion.Clear();
     resources.ClearIdleRoots();
-    if(pendingResourceUses.load(std::memory_order_acquire))
-        Log("Keeping RTHandles with pending render commands until process exit",GAKU_LOG_WARNING);
+    if(const auto pending=renderWork.Pending())
+        Log("Canceled queued FSR packets; keeping RTHandles for "+std::to_string(pending)+
+            " pending render commands until completion or process exit",GAKU_LOG_WARNING);
 }
 }
 

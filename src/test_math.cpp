@@ -1,5 +1,5 @@
 #include "FrameMath.h"
-#include "ResourceLifetime.h"
+#include "RenderWorkQueue.h"
 #include "FsrProvider.h"
 #include "FgErrorBurst.h"
 #include "FgRetry.h"
@@ -49,6 +49,38 @@ int main() {
     assert(oldTextures.InUse());
     oldTextures.Complete();
     assert(!oldTextures.InUse());
+    {
+        struct Packet { std::shared_ptr<int> nativeTexture; };
+        RenderWorkQueue<Packet,32> pending;
+        auto retained = std::make_shared<int>(1);
+        const auto skipped = pending.Begin(newTextures);
+        assert(pending.Attach(skipped,std::make_unique<Packet>(Packet{retained})));
+        pending.Complete(skipped);
+        assert(!newTextures.InUse() && !pending.Take(skipped) && retained.use_count()==1);
+        const auto rendered = pending.Begin(oldTextures);
+        assert(pending.Attach(rendered,std::make_unique<Packet>(Packet{retained})));
+        auto inflight = pending.Take(rendered);
+        assert(inflight && !pending.Take(rendered));
+        const auto abandoned = pending.Begin(oldTextures);
+        assert(pending.Attach(abandoned,std::make_unique<Packet>(Packet{retained})));
+        for(int i=2;i<32;++i) {
+            const auto id = pending.Begin(newTextures);
+            assert(id && pending.Attach(id,std::make_unique<Packet>(Packet{retained})));
+        }
+        assert(pending.Pending()==32 && pending.Begin(newTextures)==0 && retained.use_count()==33);
+        pending.Complete(rendered);
+        const auto later = pending.Begin(newTextures);
+        assert(later && later!=rendered);
+        pending.Complete(rendered); // Replaying an old Unity marker cannot release the reused slot.
+        assert(pending.Pending()==32 && oldTextures.InUse() && newTextures.InUse());
+        pending.CancelPackets();
+        assert(pending.Begin(newTextures)==0 && !pending.Take(abandoned) && retained.use_count()==2);
+        assert(pending.Pending()==32 && oldTextures.InUse());
+        pending.Complete(abandoned);
+        assert(!oldTextures.InUse() && newTextures.InUse()); // A late marker can still release the roots.
+        inflight.reset();
+        assert(retained.use_count()==1);
+    }
     assert(ParseFsrProviderVersion("4.1.2").valid);
     assert(ParseFsrProviderVersion("4.1").valid);
     assert(!ParseFsrProviderVersion("4.").valid);
