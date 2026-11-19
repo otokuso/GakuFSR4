@@ -28,6 +28,20 @@ inline int RenderSize(int display, float ratio) {
 inline float Jitter(float matrixOffset, int renderSize, int sign = -1) {
     return sign * matrixOffset * renderSize * 0.5f;
 }
+inline bool RotationJump(const float* forward, const float* previousForward) {
+    float dot = 0, a = 0, b = 0;
+    for (int i = 0; i < 3; ++i) {
+        dot += forward[i] * previousForward[i];
+        a += forward[i] * forward[i];
+        b += previousForward[i] * previousForward[i];
+    }
+    if (!(a > 0.000001f) || !(b > 0.000001f)) return true;
+    // More than 45 degrees between two consecutive frames is a likely camera cut.
+    return !(dot / std::sqrt(a * b) >= 0.70710678f);
+}
+inline float MotionVectorYScale(int renderHeight, int sign) {
+    return static_cast<float>(renderHeight) * sign;
+}
 inline bool Reset(int camera, int oldCamera, int frame, int oldFrame,
                   float fov, float oldFov, const float* pos, const float* oldPos) {
     float distance = 0;

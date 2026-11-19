@@ -31,6 +31,8 @@ AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/F
 
 `Preset` が未指定なら、旧版の `Ratio` 設定が使われます。プリセット名が認識できない場合はQualityになります。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
 
+モーションベクトルの上下方向の検証用に `MotionVectorYSign=-1`（既定）または `MotionVectorYSign=1` を設定できます。Unity/URPの実際の符号が未検証のため、既定の符号は変更していません。上下移動する被写体を同じ条件で比較し、残像や輪郭の揺れを確認してください。
+
 ジッターの座標系を比較する場合は `JitterXSign` / `JitterYSign` にそれぞれ `-1`（既定）か `1` を設定できます。変更時は射影行列・画面上のサブピクセル移動・FSRに渡す値が一致するかを同一フレームで検証してください。現時点で正しい符号は実機確認できておらず、既定の符号は変更していません。
 
 対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
