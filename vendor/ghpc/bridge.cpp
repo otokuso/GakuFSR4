@@ -21,6 +21,7 @@
 #include "dx12/ffx_api_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
+#include "../../src/FsrProvider.h"
 #include "../../src/BridgeStats.h"
 #include "../../src/FgErrorBurst.h"
 #include "../../src/FgRetry.h"
@@ -196,7 +197,7 @@ namespace
 		float expValue = 0;
 		bool exposureRequired = false;
 		uint64_t providerGen = 0;
-		std::string wantProvider = "4."; // AMD's provider names are numeric; never silently select FSR 3.
+		std::string wantProvider = "4."; // Auto-select latest FSR 4.x, never silently select FSR 3.
 		uint64_t overrideId = 0;
 		bool providersListed = false;
 		uint32_t ctxDisplayW = 0, ctxDisplayH = 0, ctxRenderW = 0, ctxRenderH = 0, ctxFlags = 0;
@@ -601,18 +602,27 @@ namespace
 		}
 		if (rc != FFX_API_RETURN_OK) { Log("FSR providers: the version query failed (%u).", rc); return g.wantProvider.empty(); }
 		std::string list;
+		FsrVersion newest{};
+		const FsrVersion pinned = g.wantProvider == "4." ? FsrVersion{} : ParseFsrProviderVersion(g.wantProvider.c_str());
+		std::string selected;
 		for (uint64_t i = 0; i < count; i++)
 		{
 			char item[96];
 			snprintf(item, sizeof item, "%s'%s' (id 0x%llX)", i ? ", " : "", names[i] ? names[i] : "?", (unsigned long long)ids[i]);
 			list += item;
-			if (!g.overrideId && !g.wantProvider.empty() && names[i] && strncmp(names[i], g.wantProvider.c_str(), g.wantProvider.size()) == 0)
-				g.overrideId = ids[i];
+			if (!names[i]) continue;
+			FsrVersion candidate = ParseFsrProviderVersion(names[i]);
+			if (g.wantProvider == "4.") {
+				if (NewerFsr4Provider(candidate, newest)) { newest = candidate; selected = names[i]; g.overrideId = ids[i]; }
+			} else if (candidate.valid && candidate.major == pinned.major &&
+				candidate.minor == pinned.minor && candidate.patch == pinned.patch) {
+				selected = names[i]; g.overrideId = ids[i];
+			}
 		}
 		Log("FSR providers on this GPU (%llu): %s.", (unsigned long long)count, list.c_str());
 		if (g.wantProvider.empty()) return true;
 		if (!g.overrideId) { Log("FSR provider '%s' asked for: not offered here.", g.wantProvider.c_str()); return false; }
-		Log("FSR provider forced: '%s' (id 0x%llX).", g.wantProvider.c_str(), (unsigned long long)g.overrideId);
+		Log("FSR provider %s: '%s' (id 0x%llX).", g.wantProvider == "4." ? "latest 4.x" : "pinned", selected.c_str(), (unsigned long long)g.overrideId);
 		return true;
 	}
 
@@ -1515,6 +1525,16 @@ EXPORT int FSR4_Load(const wchar_t* dir)
 	ffxLoadFunctions(&g.fx, g.loaderDll);
 	if (!g.fx.CreateContext || !g.fx.Dispatch || !g.fx.Query || !g.fx.DestroyContext || !g.fx.Configure) { Log("The FSR loader lacks its entry points."); return 0; }
 	g.loaded = true;
+	return 1;
+}
+
+EXPORT int FSR4_SetProviderVersion(const char* version)
+{
+	if (g.providersListed || g.fsr || !version) return 0;
+	if (!*version) { g.wantProvider = "4."; return 1; }
+	const FsrVersion parsed = ParseFsrProviderVersion(version);
+	if (!parsed.valid || parsed.major != 4) return 0;
+	g.wantProvider = version;
 	return 1;
 }
 

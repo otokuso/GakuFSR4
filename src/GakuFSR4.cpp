@@ -594,6 +594,16 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         return GAKU_E_UNAVAILABLE;
     dataPath=std::wstring(runtime.localRoot)+L"\\PluginData\\gakufsr4";
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
+    wchar_t providerVersion[64]{};
+    GetPrivateProfileStringW(L"FSR4",L"ProviderVersion",L"",providerVersion,64,config.c_str());
+    if(providerVersion[0]) {
+        char asciiVersion[128]{};
+        if(!WideCharToMultiByte(CP_UTF8,0,providerVersion,-1,asciiVersion,sizeof asciiVersion,nullptr,nullptr)||
+           !FSR4_SetProviderVersion(asciiVersion)) {
+            Log("Invalid ProviderVersion; use an available FSR 4.x version such as 4.1.2",GAKU_LOG_ERROR);
+            return GAKU_E_INVALID_ARGUMENT;
+        }
+    }
     motionVectorYSign=GetPrivateProfileIntW(L"FSR4",L"MotionVectorYSign",-1,config.c_str());
     if(motionVectorYSign!=1&&motionVectorYSign!=-1) {
         Log("MotionVectorYSign must be +1 or -1",GAKU_LOG_ERROR);
