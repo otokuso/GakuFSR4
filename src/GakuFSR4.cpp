@@ -30,6 +30,7 @@ bool frameGeneration=false;
 bool fsrJitterCycle=false;
 int motionVectorYSign=-1;
 int jitterXSign=-1,jitterYSign=-1;
+bool nativeAaBeforePost=false;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -264,6 +265,7 @@ struct Capture {
     Root camera,motion;
     int frame=-1,id=0;
     float jitterX=0,jitterY=0;
+    bool earlyNativeAA=false;
 };
 Capture& capture=*new Capture;
 struct History {
@@ -370,7 +372,7 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 
-void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh);
+void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh,bool beforePost=false);
 
 bool LiveTexture(P texture) {
     return texture && At<P>(texture,field.objectPtr);
@@ -384,6 +386,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     static int blockedCamera=0,retryFrame=0;
     int frame=0,id=0;
     const bool offscreen=At<P>(cd,field.target)!=nullptr;
+    const bool earlyNativeAA=frame_math::EarlyNativeAA(nativeAaBeforePost,offscreen,ratio);
     const char* stage="camera validation";
     try {
         frame=api.Value<int>(method.frame);
@@ -391,7 +394,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         if(frame!=configuredFrame||std::find(configuredCameras.begin(),configuredCameras.end(),id)==configuredCameras.end()) {
             originalTaa(cmd,material,cd,src,dst,motion,mi);return;
         }
-        if(offscreen && (!frame_math::RetryCamera(id,blockedCamera,frame,retryFrame) ||
+        if((offscreen || earlyNativeAA) && (!frame_math::RetryCamera(id,blockedCamera,frame,retryFrame) ||
             !src || !dst || !LiveTexture(At<P>(src,field.rt)) ||
             !LiveTexture(At<P>(dst,field.rt)) || !LiveTexture(motion))) {
             originalTaa(cmd,material,cd,src,dst,motion,mi);
@@ -403,10 +406,12 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         capture.camera=Root(At<P>(cd,field.camera)); capture.motion=Root(motion);
         capture.frame=frame;
         capture.id=id;
+        capture.earlyNativeAA=false;
         capture.jitterX=frame_math::Jitter(matrix[12],w,jitterXSign);
         capture.jitterY=frame_math::Jitter(matrix[13],h,jitterYSign);
-        if(offscreen && ratio==1.0f) {
+        if((offscreen || earlyNativeAA) && ratio==1.0f) {
             if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
+                capture.frame=-1;
                 originalTaa(cmd,material,cd,src,dst,motion,mi);
                 return;
             }
@@ -418,15 +423,19 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
             stage="copy scene color";
             BlitCamera(cmd,src,resources.color.handle.Get());
             stage="queue FSR frame";
-            QueueFrame(cmd,cd,w,h,w,h);
+            QueueFrame(cmd,cd,w,h,w,h,earlyNativeAA);
             stage="copy FSR output";
             BlitCamera(cmd,resources.output.handle.Get(),dst);
+            capture.earlyNativeAA=earlyNativeAA;
             if(blockedCamera==id && retryFrame>0) {
                 retryFrame=0;
                 Log("Resumed FSR 4 Native AA after a frame fallback");
             }
-            static bool queued=false;
-            if(!queued) { queued=true; Log("Queued first FSR 4 Native AA frame in the TAA pass"); }
+            static bool queuedOffscreen=false,queuedEarly=false;
+            bool& queued=earlyNativeAA?queuedEarly:queuedOffscreen;
+            if(!queued) { queued=true; Log(earlyNativeAA ?
+                "Queued first screen NativeAA frame before post-processing" :
+                "Queued first FSR 4 Native AA frame in the TAA pass"); }
         } else {
             BlitCamera(cmd,src,dst);
         }
@@ -438,7 +447,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         }
         return;
     } catch(const ManagedFailure& e) {
-        if(offscreen && id!=0) {
+        if((offscreen || earlyNativeAA) && id!=0) {
             blockedCamera=id;
             retryFrame=frame+30;
             history.frame=-1;
@@ -449,7 +458,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     originalTaa(cmd,material,cd,src,dst,motion,mi);
 }
 
-void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
+void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh,bool beforePost) {
     Blit(cmd,nullptr,resources.depth.texture.Get(),true);
     Blit(cmd,capture.motion.Get(),resources.motion.texture.Get());
     // A failed FSR dispatch leaves a valid spatially scaled frame, never uninitialized memory.
@@ -462,7 +471,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     // before later overlay UI may be drawn to the game's swap chain. Expose the
     // pre-overlay FSR output for HUDless/UI composition validation. Whether
     // every in-game canvas is absent must still be verified in the target game.
-    fd.hudless=frameGeneration && !At<P>(cd,field.target) ? fd.output : nullptr;
+    fd.hudless=frameGeneration && !beforePost && !At<P>(cd,field.target) ? fd.output : nullptr;
     P pointers[]{fd.color,fd.depth,fd.motion,fd.output};
     for(int i=0;i<4;++i) packet->textures[i]=static_cast<ID3D11Resource*>(pointers[i]);
     fd.renderW=w;fd.renderH=h;fd.displayW=dw;fd.displayH=dh;
@@ -477,7 +486,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     // bridge to retain SDK auto exposure rather than fabricating 1.0.
     fd.fovV=fov*0.01745329252f;fd.sharpness=sharpness;fd.exposure=0;
     fd.createFlags=FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
-    if(At<P>(cd,field.target)&&At<bool>(cd,field.hdr)) fd.createFlags|=FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    if(frame_math::FsrInputIsHdr(At<bool>(cd,field.hdr),At<P>(cd,field.target)!=nullptr,beforePost)) fd.createFlags|=FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
     if(api.Value<bool>(method.reversed)) fd.createFlags|=FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
     using Vec3=std::array<float,3>;
     P transform=api.Invoke(method.transform,capture.camera.Get());
@@ -520,30 +529,38 @@ void Final(P self,P cmd,P rd,M mi) {
     try {
         if(enabled && !renderFailed && !At<P>(cd,field.target) && At<bool>(cd,field.resolve) && capture.frame==api.Value<int>(method.frame) &&
            capture.id==api.Value<int>(method.id,At<P>(cd,field.camera))) {
-            P source=At<P>(self,field.source);
-            if(At<bool>(self,field.swap)) {
-                P renderer=At<P>(cd,field.renderer);
-                if(!method.getBackBuffer) method.getBackBuffer=api.Method(api.object_get_class(renderer),"GetCameraColorBackBuffer",{"UnityEngine.Rendering.CommandBuffer"});
-                source=api.Invoke(method.getBackBuffer,renderer,{cmd});
-            }
-            P sourceTexture=source?At<P>(source,field.rt):nullptr;
-            if(!sourceTexture) throw std::runtime_error("Final source has no RenderTexture");
-            int w=api.Value<int>(method.width,sourceTexture),h=api.Value<int>(method.height,sourceTexture);
-            int dw=At<int>(cd,field.pixelW),dh=At<int>(cd,field.pixelH);
+            P output=nullptr;
+            int dw=0,dh=0;
             P desc=static_cast<char*>(cd)+field.descriptor;
-            if(w!=At<int>(desc,field.descWidth)||h!=At<int>(desc,field.descHeight))
-                throw std::runtime_error("Scaled RTHandles are not supported by this integration");
-            resources.Ensure(w,h,dw,dh);
-            use.Begin(cmd);
-            BlitCamera(cmd,source,resources.color.handle.Get());
-            QueueFrame(cmd,cd,w,h,dw,dh);
+            if(!capture.earlyNativeAA) {
+                P source=At<P>(self,field.source);
+                if(At<bool>(self,field.swap)) {
+                    P renderer=At<P>(cd,field.renderer);
+                    if(!method.getBackBuffer) method.getBackBuffer=api.Method(api.object_get_class(renderer),"GetCameraColorBackBuffer",{"UnityEngine.Rendering.CommandBuffer"});
+                    source=api.Invoke(method.getBackBuffer,renderer,{cmd});
+                }
+                P sourceTexture=source?At<P>(source,field.rt):nullptr;
+                if(!sourceTexture) throw std::runtime_error("Final source has no RenderTexture");
+                int w=api.Value<int>(method.width,sourceTexture),h=api.Value<int>(method.height,sourceTexture);
+                dw=At<int>(cd,field.pixelW);dh=At<int>(cd,field.pixelH);
+                if(w!=At<int>(desc,field.descWidth)||h!=At<int>(desc,field.descHeight))
+                    throw std::runtime_error("Scaled RTHandles are not supported by this integration");
+                resources.Ensure(w,h,dw,dh);
+                use.Begin(cmd);
+                BlitCamera(cmd,source,resources.color.handle.Get());
+                QueueFrame(cmd,cd,w,h,dw,dh);
+                output=resources.output.handle.Get();
+            }
 
             restore.saved.assign(static_cast<char*>(cd),static_cast<char*>(cd)+field.cameraSize);
             restore.source=At<P>(self,field.source);restore.swap=At<bool>(self,field.swap);
             restore.active=true;
-            At<P>(self,field.source)=resources.output.handle.Get();At<bool>(self,field.swap)=false;
-            At<int>(desc,field.descWidth)=dw;At<int>(desc,field.descHeight)=dh;
-            At<float>(cd,field.scale)=1;At<int>(cd,field.scaling)=0;At<int>(cd,field.aa)=0;
+            if(output) {
+                At<P>(self,field.source)=output;At<bool>(self,field.swap)=false;
+                At<int>(desc,field.descWidth)=dw;At<int>(desc,field.descHeight)=dh;
+                At<float>(cd,field.scale)=1;At<int>(cd,field.scaling)=0;
+            }
+            At<int>(cd,field.aa)=0;
         }
     } catch(const std::exception& e) { Stop(e.what()); }
     originalFinal(self,cmd,rd,mi);
@@ -721,6 +738,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(fsrJitterCycle) Log("Experimental FSR jitter phase cycle enabled",GAKU_LOG_WARNING);
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
+    const bool configEarlyNativeAA=GetPrivateProfileIntW(L"FSR4",L"NativeAABeforePost",0,config.c_str())!=0;
     wchar_t value[64];
     wchar_t* end=nullptr;
     if(GetPrivateProfileStringW(L"FSR4",L"Preset",L"",value,64,config.c_str())) {
@@ -773,6 +791,9 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
             Log("Invalid FG radial distortion settings; using normal frame generation",GAKU_LOG_WARNING);
         }
     }
+    nativeAaBeforePost=configEarlyNativeAA && ratio==1.0f;
+    if(configEarlyNativeAA && !nativeAaBeforePost)
+        Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the normal FSR path",GAKU_LOG_WARNING);
     if(frameGeneration&&!CaptureGameSwapChain(hooks))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
