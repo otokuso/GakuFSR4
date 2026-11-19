@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "ResourceLifetime.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -167,12 +168,39 @@ struct Surface {
         if(!handle.Get()) throw std::runtime_error("RTHandles.Alloc failed");
     }
 };
+std::atomic<uint64_t> submitted{0}, completed{0};
 struct Resources {
     Surface color,depth,motion,output;
     int w=0,h=0,dw=0,dh=0;
+    struct Retired {
+        Surface color,depth,motion,output;
+        uint64_t lastSubmit=0;
+        void Release() { color.Release(); depth.Release(); motion.Release(); output.Release(); }
+    };
+    std::vector<Retired> retired;
+    void Reap() {
+        const uint64_t done=completed.load(std::memory_order_acquire);
+        for(auto it=retired.begin();it!=retired.end();) {
+            if(FinishedUsingResources(it->lastSubmit,done)) {
+                it->Release();
+                it=retired.erase(it);
+            } else ++it;
+        }
+    }
     void Ensure(int rw,int rh,int displayW,int displayH) {
         if(w==rw&&h==rh&&dw==displayW&&dh==displayH) return;
-        color.Release(); depth.Release(); motion.Release(); output.Release();
+        Reap();
+        const uint64_t last=submitted.load(std::memory_order_acquire);
+        if(last>completed.load(std::memory_order_acquire)) {
+            Retired old{};
+            old.color=std::move(color);old.depth=std::move(depth);
+            old.motion=std::move(motion);old.output=std::move(output);
+            old.lastSubmit=last;
+            retired.push_back(std::move(old));
+            Log("Deferred old RTHandle release until render event "+std::to_string(last)+" completes");
+        } else {
+            color.Release(); depth.Release(); motion.Release(); output.Release();
+        }
         w=h=dw=dh=0;
         color.Create(rw,rh,2); depth.Create(rw,rh,14); motion.Create(rw,rh,13);
         output.Create(displayW,displayH,2,true);
@@ -202,7 +230,6 @@ struct History {
     int frame=-1,id=0,w=0,h=0;
     float fov=0,pos[3]{};
 } history;
-std::atomic<uint64_t> submitted{0}, completed{0};
 int configuredFrame=-1;
 std::vector<int> configuredCameras;
 
@@ -612,6 +639,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
 }
 void Tick(P,float) {
     try {
+        resources.Reap();
         if(enabled&&!attempted) { attempted=true; Bind(); }
         char line[1024];for(int i=0;i<24&&FSR4_PollLog(line,sizeof line)>0;++i) Log(line);
         if(renderFailed.exchange(false)) Stop("FSR backend failed (see bridge log)");
@@ -630,6 +658,9 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    resources.Reap();
+    if(!resources.retired.empty())
+        Log("Pending render events still refer to old RTHandles; retaining them until process exit",GAKU_LOG_WARNING);
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
