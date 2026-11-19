@@ -659,6 +659,21 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
             FSR4_SetFgViewportOverride(x,y,w,h);
         }
     }
+    if(frameGeneration) {
+        float k1=0,k2=0,centerX=.5f,centerY=.5f;
+        const auto readField=[&](const wchar_t* name,const wchar_t* fallback,float& result) {
+            wchar_t text[64];
+            const auto count=GetPrivateProfileStringW(L"FSR4",name,fallback,text,64,config.c_str());
+            wchar_t* end=nullptr;
+            result=wcstof(text,&end);
+            return count<63 && end!=text && !*end && std::isfinite(result);
+        };
+        if(!readField(L"FGDistortionK1",L"0",k1) || !readField(L"FGDistortionK2",L"0",k2) ||
+           !readField(L"FGDistortionCenterX",L"0.5",centerX) || !readField(L"FGDistortionCenterY",L"0.5",centerY) ||
+           !FSR4_SetFgRadialDistortion(k1,k2,centerX,centerY)) {
+            Log("Invalid FG radial distortion settings; using normal frame generation",GAKU_LOG_WARNING);
+        }
+    }
     if(frameGeneration&&!CaptureGameSwapChain(hooks))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;

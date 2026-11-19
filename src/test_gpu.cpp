@@ -40,7 +40,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool fgOffset=argc==4&&wcscmp(argv[3],L"--fg-offset")==0;
     const bool fgCross=fgOffset||(argc==4&&wcscmp(argv[3],L"--fg-cross")==0);
     const bool fgResized=fgScaled||fgLetterbox||fgCross;
-    const bool fg=fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
+    const bool fgDistortion=argc==4&&wcscmp(argv[3],L"--fg-distortion")==0;
+    const bool fg=fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||fgCross||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
     if(argc==4&&!portrait&&!fg&&!dynamic) return 2;
     auto dll=LoadLibraryW(argv[1]);if(!dll) return 3;
@@ -57,6 +58,11 @@ int wmain(int argc,wchar_t** argv) {
             GetProcAddress(dll,"FSR4_SetFgViewportOverride"));
         if(!setViewport) return 4;
         setViewport(50,0,608,1080);
+    }
+    if(fgDistortion) {
+        auto setDistortion=reinterpret_cast<int(*)(float,float,float,float)>(
+            GetProcAddress(dll,"FSR4_SetFgRadialDistortion"));
+        if(!setDistortion || !setDistortion(0.1f,0,0.5f,0.5f)) return 4;
     }
     puts("GPU test: AMD runtime loaded");
     try {
@@ -163,14 +169,18 @@ int wmain(int argc,wchar_t** argv) {
         bool letterboxViewport=false;
         bool crossViewport=false;
         bool synchronizedPair=false;
+        bool distortionUploaded=false, distortionRejected=false;
         char log[1024];while(poll(log,sizeof log)>0) {
             puts(log);
+            distortionUploaded|=strstr(log,"FG distortion: uploaded radial UV offsets")!=nullptr;
+            distortionRejected|=strstr(log,"FG provider rejected radial distortion field")!=nullptr;
             reducedFgSize|=strstr(log,"FG context: inputs up to 1440x2560, display 1440x2560")!=nullptr;
             letterboxViewport|=strstr(log,"FG centered viewport: 0,131 1920x817 in 1920x1080.")!=nullptr;
             crossViewport|=strstr(log,fgOffset ? "FG configured viewport: 50,0 608x1080 in 1920x1080." :
                 "FG centered viewport: 656,0 608x1080 in 1920x1080.")!=nullptr;
             synchronizedPair|=strstr(log,"FG synchronizes flip-model frame pairs to vblank.")!=nullptr;
         }
+        if(fgDistortion && (!distortionUploaded || distortionRejected)) return 10;
         Stats s{};stats(&s);
         printf("frames=%llu, provider=%s, result=%d, failed=%d\n",s.frames,s.provider,s.lastResult,s.failed);
         if(s.frames!=frameCount||s.failed||s.lastResult||strncmp(s.provider,"4.",2)) return 5;

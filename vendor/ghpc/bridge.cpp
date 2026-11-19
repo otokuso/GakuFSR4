@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "../../src/FgDistortionMath.h"
 
 #include "ffx_api.h"
 #include "ffx_api_loader.h"
@@ -195,6 +196,9 @@ namespace
 		ffxContext fsr = nullptr;
 		ComPtr<ID3D12Resource> expTex;
 		ComPtr<ID3D12Resource> expUpload;
+		ComPtr<ID3D12Resource> distortionTex, distortionUpload;
+		float distortionK1 = 0, distortionK2 = 0, distortionCenterX = .5f, distortionCenterY = .5f;
+		bool distortionAttempted = false, distortionDisabled = false;
 		float expValue = 0;
 		bool exposureRequired = false;
 		uint64_t providerGen = 0;
@@ -380,6 +384,9 @@ namespace
 		g.fg = nullptr;
 		g.fgDisplayW = g.fgDisplayH = g.fgRenderW = g.fgRenderH = g.fgFlags = 0;
 		g.fgPending = g.fgHavePrevious = false;
+		g.distortionTex.Reset();
+		g.distortionUpload.Reset();
+		g.distortionAttempted = g.distortionDisabled = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
 		g.fgPaceSamples = 0;
@@ -436,6 +443,7 @@ namespace
 			g.readback.Detach();
 			g.expTex.Detach();
 			g.expUpload.Detach();
+			g.distortionTex.Detach(); g.distortionUpload.Detach();
 			g.scalePso.Detach(); g.scaleRs.Detach(); g.scaleHeap.Detach();
 			g.in12.Detach();
 			g.out12.Detach();
@@ -930,6 +938,71 @@ void main(uint3 id : SV_DispatchThreadID)
 		return FgMatchingAspectRatio(w, h, sceneW, sceneH);
 	}
 
+	// Optional, user-calibrated radial UV offset field for the FG optical-flow
+	// input. Its texture is created only if coefficients are nonzero; the game
+	// must still supply the *actual* post-effect transform for full accuracy.
+	bool EnsureFgDistortion(ID3D12GraphicsCommandList* list)
+	{
+		if ((!g.distortionK1 && !g.distortionK2) || g.distortionDisabled) return false;
+		if (g.distortionTex) return true;
+		if (g.distortionAttempted) return false;
+		g.distortionAttempted = true;
+		const UINT width=g.fgDisplayW, height=g.fgDisplayH;
+		if (!width || !height || uint64_t(width)*height > 3840ull*2160ull) {
+			Log("FG distortion field: size %ux%u exceeds the supported 4K limit.", width, height);
+			return false;
+		}
+		D3D12_HEAP_PROPERTIES heap = {};
+		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+		D3D12_RESOURCE_DESC tex = {};
+		tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		tex.Width = width; tex.Height = height;
+		tex.DepthOrArraySize = tex.MipLevels = 1;
+		tex.Format = DXGI_FORMAT_R32G32_FLOAT;
+		tex.SampleDesc.Count = 1;
+		ComPtr<ID3D12Resource> field, upload;
+		if (!Check(g.d12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &tex,
+			D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&field)), "FG distortion texture")) return false;
+		D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout = {};
+		UINT rows = 0;
+		UINT64 bytes = 0;
+		g.d12->GetCopyableFootprints(&tex, 0, 1, 0, &layout, &rows, nullptr, &bytes);
+		if (!bytes || rows != height) return false;
+		heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+		D3D12_RESOURCE_DESC buffer = {};
+		buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		buffer.Width = bytes;
+		buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+		buffer.SampleDesc.Count = 1;
+		buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		if (!Check(g.d12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+			D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "FG distortion upload")) return false;
+		void* mapped = nullptr;
+		const D3D12_RANGE none = {0,0};
+		if (!Check(upload->Map(0, &none, &mapped), "FG distortion upload Map")) return false;
+		for (UINT y=0;y<height;++y) {
+			float* row=reinterpret_cast<float*>(static_cast<char*>(mapped) + layout.Offset + UINT64(y)*layout.Footprint.RowPitch);
+			for (UINT x=0;x<width;++x) {
+				const float u=(float(x)+.5f)/width, v=(float(y)+.5f)/height;
+				const auto offset=fg_distortion::RadialOffset(u,v,g.distortionCenterX,g.distortionCenterY,g.distortionK1,g.distortionK2);
+				row[x*2]=offset.x; row[x*2+1]=offset.y;
+			}
+		}
+		const D3D12_RANGE written = {0,static_cast<SIZE_T>(bytes)};
+		upload->Unmap(0, &written);
+		D3D12_TEXTURE_COPY_LOCATION dest={}, source={};
+		dest.pResource=field.Get(); dest.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		source.pResource=upload.Get(); source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		source.PlacedFootprint=layout;
+		list->CopyTextureRegion(&dest,0,0,0,&source,nullptr);
+		D3D12_RESOURCE_BARRIER barrier;
+		Barrier(field.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,barrier);
+		list->ResourceBarrier(1,&barrier);
+		g.distortionTex=field; g.distortionUpload=upload;
+		Log("FG distortion: uploaded radial UV offsets at %ux%u (k1=%.3f, k2=%.3f).",width,height,g.distortionK1,g.distortionK2);
+		return true;
+	}
+
 	ImageRect FitScene(UINT w, UINT h, UINT sceneW, UINT sceneH)
 	{
 		// shortcut: uses the game's centered aspect-fit placement, read the compositing viewport if a scene uses an offset.
@@ -1027,7 +1100,22 @@ void main(uint3 id : SV_DispatchThreadID)
 		c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
 		c.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
 		c.frameID = id;
+		ffxConfigureDescFrameGenerationRegisterDistortionFieldResource distortion = {};
+		const bool withDistortion=EnsureFgDistortion(l);
+		if (withDistortion) {
+			distortion.header.type=FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION_REGISTERDISTORTIONRESOURCE;
+			distortion.distortionField=ffxApiGetResourceDX12(g.distortionTex.Get(),FFX_API_RESOURCE_STATE_COMPUTE_READ);
+			c.header.pNext=&distortion.header;
+		}
 		ffxReturnCode_t rc = g.fx.Configure(&g.fg, &c.header);
+		if (rc != FFX_API_RETURN_OK && withDistortion) {
+			// Not all installed providers support this optional extension.
+			// Preserve normal FG if the distortion resource is rejected.
+			Log("FG provider rejected radial distortion field (%u); continuing with regular FG.",rc);
+			g.distortionDisabled=true;
+			c.header.pNext=nullptr;
+			rc=g.fx.Configure(&g.fg,&c.header);
+		}
 		if (rc != FFX_API_RETURN_OK) { FgFailure(1, "configure", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
@@ -1527,6 +1615,18 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	Average(g.stats.fgHookMs, (t3.QuadPart - entry.QuadPart) * 1000.0 / qf.QuadPart);
 	Publish();
 	return true;
+}
+
+EXPORT int FSR4_SetFgRadialDistortion(float k1, float k2, float centerX, float centerY)
+{
+	// Called during plugin activation, before any render thread is scheduled.
+	if (g.submits || !std::isfinite(k1) || !std::isfinite(k2) ||
+		!std::isfinite(centerX) || !std::isfinite(centerY) ||
+		fabsf(k1) > 4 || fabsf(k2) > 4 ||
+		centerX < 0 || centerX > 1 || centerY < 0 || centerY > 1) return 0;
+	g.distortionK1=k1; g.distortionK2=k2;
+	g.distortionCenterX=centerX; g.distortionCenterY=centerY;
+	return 1;
 }
 
 EXPORT int FSR4_Load(const wchar_t* dir)
