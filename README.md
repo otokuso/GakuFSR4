@@ -31,6 +31,8 @@ AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/F
 
 `Preset` が未指定なら、旧版の `Ratio` 設定が使われます。プリセット名が認識できない場合はQualityになります。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
 
+画質比較専用の実験設定として `JitterPhaseMode=1` を指定すると、FSR倍率に合わせてジッター周期を変えます（Quality 18、Balanced 23、Performance 32、UltraPerformance 72）。既定の `0` はUnityのジッターを維持します。周期変更は描画側のジッターにも影響するため、再現可能な動体シーンで輪郭・残像・ちらつきを比較したうえで採否を判断してください。
+
 対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
 
 フレーム生成は既定で無効です。`FrameGeneration=1` で有効になり、ゲームログの `FSR Frame Generation active` に実際に使ったバージョンが出ます。4.0.2にはWindows 11とRadeon RX 9000シリーズ以降が必要です。縦画面と横画面のSDR表示で、補間フレームを挟める表示間隔があるときに動作します。中央に表示される映像に黒帯が付く場合は、映像部分を補間して黒帯やその上のUIを実フレームから残します。映像部分のUIも補間の対象になります。ウィンドウが小さいときは、カメラの描画解像度を下限に補間の処理解像度を抑えます。
