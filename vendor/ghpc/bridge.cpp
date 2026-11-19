@@ -31,6 +31,7 @@
 #include "../../src/ExposurePolicy.h"
 #include "../../src/FgDropNotice.h"
 #include "../../src/NativeSwapchain.h"
+#include "../../src/PresentRate.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -1264,7 +1265,8 @@ void main(uint3 id : SV_DispatchThreadID)
 			|| !EnsureShared(g.motion, (ID3D11Texture2D*)fd.motion, false, "motion vectors", true)
 			|| !EnsureShared(g.output, (ID3D11Texture2D*)fd.output, true, "output", true)) { Fail("shared textures (above)."); return; }
 		if (!EnsureContext(fd)) { Fail("no FSR context (above)."); return; }
-		if (fd.fg && g.fgDll && !nativePresent.chain) InstallPresentHook(static_cast<ID3D11Resource*>(fd.color));
+		if (!nativePresent.chain && ((fd.fg && g.fgDll) || !PresentHooked()))
+			InstallPresentHook(static_cast<ID3D11Resource*>(fd.color));
 
 		int slot = (int)(g.submits % Slots);
 		if (!WaitOut(g.allocFence[slot], FrameWaitMs, "command allocator reuse")) { Fail("the GPU stopped making progress (above)."); return; }
@@ -1577,8 +1579,9 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	if (FAILED(hr)) return hr;
 	nativePresent.fence = done;
 	hr = present();
+	const auto frames = nativePresent.generated.exchange(0);
 	if (SUCCEEDED(hr)) {
-		const auto frames = nativePresent.generated.exchange(0);
+		if (hr == S_OK) CountPresentFrames(1, frames);
 		const auto failure = nativePresent.error.exchange(FFX_API_RETURN_OK);
 		if (failure != FFX_API_RETURN_OK) FgFailure(3, "native SwapChain callback", failure, g.fgFrameId);
 		if (frames) {
@@ -1838,6 +1841,7 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		return true;
 	}
 	g.stats.fgGenerated++;
+	if (IsGameFpsWindow(chain.OutputWindow)) CountPresentFrames(0, 1);
 	static bool reportedSync = false;
 	if (syncPair && !reportedSync) {
 		reportedSync = true;

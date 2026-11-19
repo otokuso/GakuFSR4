@@ -9,6 +9,7 @@
 #include <mutex>
 #include "GakuPlugin.h"
 #include "../../src/PresentHookSlots.h"
+#include "../../src/PresentRate.h"
 #include "../../src/NativeSwapchain.h"
 
 using Microsoft::WRL::ComPtr;
@@ -36,6 +37,7 @@ namespace
 	std::atomic<bool> g_hooked{ false };
 	std::atomic<HWND> g_window{ nullptr };
 	std::atomic<uint64_t> g_presents{ 0 };
+	std::atomic<uint64_t> g_realFrames{ 0 }, g_generatedFrames{ 0 };
 	thread_local bool g_inHook = false;
 
 	void* OriginalSlot(IDXGISwapChain* chain, size_t index)
@@ -80,6 +82,11 @@ namespace
 			ours = FgPresent(sc, sync, flags, original, parameters, &hr);
 			g_presents++;
 			if (!ours) hr = original(sc, sync, flags, parameters);
+			if (hr == S_OK && !(flags & DXGI_PRESENT_TEST)) {
+				DXGI_SWAP_CHAIN_DESC desc{};
+				if (SUCCEEDED(sc->GetDesc(&desc)) && IsGameFpsWindow(desc.OutputWindow))
+					CountPresentFrames(1, 0);
+			}
 			g_inHook = false;
 			return hr;
 		}
@@ -270,3 +277,17 @@ bool IsPresentWindow(HWND window) {
 }
 bool PresentHooked() { return g_hooked; }
 uint64_t PresentsSeen() { return g_presents.load(); }
+
+bool IsGameFpsWindow(void* window) {
+	if (const HWND known = g_window.load()) return known == window;
+	return UnityWindow(static_cast<HWND>(window));
+}
+
+void CountPresentFrames(uint64_t real, uint64_t generated) {
+	if(real) g_realFrames.fetch_add(real, std::memory_order_relaxed);
+	if(generated) g_generatedFrames.fetch_add(generated, std::memory_order_relaxed);
+}
+
+PresentCounts ReadPresentCounts() {
+	return {g_realFrames.load(std::memory_order_relaxed), g_generatedFrames.load(std::memory_order_relaxed)};
+}

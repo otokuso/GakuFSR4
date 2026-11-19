@@ -82,7 +82,7 @@ int wmain(int argc,wchar_t** argv){
             if(message.find("AMD FSR DLL loading failed")!=std::string::npos) failover=true;
     }
     for(auto& message:messages) puts(message.c_str());
-    if(!failover||hookRequests) return 7;
+    if(!failover||hookRequests!=(activation==GAKU_OK?1:0)) return 7;
     puts("PASS: plugin ABI, settings panel draw and unavailable-runtime failover; no game started.");
     return 0;
 }

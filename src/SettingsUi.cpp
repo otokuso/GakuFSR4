@@ -5,6 +5,7 @@
 #include "imgui.h"
 #include "Preset.h"
 #include "BridgeStats.h"
+#include "PresentRate.h"
 #include "SettingsUi.h"
 
 extern "C" void FSR4_GetStats(Stats* out);
@@ -55,6 +56,12 @@ void DrawSettings(void*) {
     ImGui::SetAllocatorFunctions(binding.alloc,binding.free,binding.allocatorUserData);
     auto* previous=ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(static_cast<ImGuiContext*>(binding.imguiContext));
+    static PresentRate fps;
+    fps.Sample(GetTickCount64(),ReadPresentCounts());
+    if(fps.ready)
+        ImGui::Text("Game FPS: %.1f  |  Present FPS (incl. FG): %.1f",fps.realFps,fps.totalFps);
+    else
+        ImGui::TextUnformatted("Game FPS: --  |  Present FPS (incl. FG): --");
     ImGui::Checkbox("Enable FSR 4",&draftEnabled);
     ImGui::Checkbox("Frame Generation (2x)",&draftFrameGeneration);
     if(ImGui::BeginCombo("Preset",draftPreset<0?"Custom ratio":FsrPresets[draftPreset].label)) {
