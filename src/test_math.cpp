@@ -1,5 +1,6 @@
 #include "FrameMath.h"
 #include "PresentRate.h"
+#include "LiveTiming.h"
 #include "RenderWorkQueue.h"
 #include "FsrProvider.h"
 #include "FgErrorBurst.h"
@@ -8,6 +9,7 @@
 #include "FgViewportMath.h"
 #include "ExposurePolicy.h"
 #include "PresentHookSlots.h"
+#include "PresentHookRetry.h"
 #include "FgDropNotice.h"
 #include "TaaJitter.h"
 #include "Preset.h"
@@ -40,6 +42,54 @@ static_assert(frame_math::FsrInputIsHdr(true,true,false));
 static_assert(!frame_math::FsrInputIsHdr(true,false,false));
 static_assert(!frame_math::FsrInputIsHdr(false,false,true));
 int main() {
+    {
+        LiveTimingTracker timing;
+        constexpr uint64_t hz=1000000;
+        timing.ObservePresent(1000000,hz);
+        timing.ObserveInput(1002000);
+        timing.ObservePresent(1010000,hz);
+        const auto first=timing.Snapshot(1010000,hz);
+        assert(first.present.samples==1 && first.present.medianMs==10);
+        assert(first.input.samples==1 && first.input.medianMs==8);
+        timing.ObservePresent(1020000,hz);
+        assert(timing.Snapshot(1020000,hz).input.samples==1); // one event, one Present
+        timing.ObserveInput(1022000);
+        timing.ObserveInput(1025000); // the latest consumed input event wins
+        timing.ObservePresent(1030000,hz);
+        const auto next=timing.Snapshot(1030000,hz);
+        assert(next.present.samples==3 && next.present.p99Ms==10 && next.present.stddevMs==0);
+        assert(next.input.samples==2 && next.input.medianMs==5 && next.input.p95Ms==8);
+        timing.ObserveInput(1032000);
+        timing.ObservePresent(2100000,hz); // a long hitch is not a pacing sample or stale input sample
+        assert(timing.Snapshot(2100000,hz).present.samples==3);
+        assert(timing.Snapshot(2100000,hz).input.samples==2);
+        assert(timing.Snapshot(13000000,hz).present.samples==0);
+        assert(timing.Snapshot(13000000,hz).input.samples==0);
+        timing.Reset();
+        assert(timing.Snapshot(1030000,hz).present.samples==0);
+    }
+    {
+        LiveTimingTracker timing;
+        constexpr uint64_t hz = 1000;
+        timing.ObserveInput(130);
+        timing.ObservePresent(120, hz); // This Present entered before the input arrived.
+        assert(timing.Snapshot(130, hz).input.samples == 0);
+        timing.ObservePresent(150, hz);
+        const auto input = timing.Snapshot(150, hz).input;
+        assert(input.samples == 1 && input.medianMs == 20);
+    }
+    {
+        TimingSampleWindow<3> window;
+        for(uint64_t i=1;i<=4;++i) window.Add(static_cast<double>(i),i*1000);
+        const auto samples=window.Snapshot(4000,1000);
+        assert(samples.samples==3 && samples.medianMs==3 && samples.p95Ms==4 && samples.p99Ms==4);
+        assert(window.Snapshot(15000,1000).samples==0); // samples expire after ten seconds
+        TimingSampleWindow<100> percentiles;
+        for(uint64_t i=1;i<=100;++i) percentiles.Add(static_cast<double>(i),1000+i);
+        const auto distribution=percentiles.Snapshot(1200,1000);
+        assert(distribution.samples==100 && distribution.medianMs==50);
+        assert(distribution.p95Ms==95 && distribution.p99Ms==99);
+    }
     PresentRate fps;
     fps.Sample(100,{0,0});
     assert(!fps.ready);
@@ -118,6 +168,32 @@ int main() {
     assert(!retry.Ready(2000000));
     retry.NewDevice();
     assert(retry.Ready(0));
+    // A successful D3D11 shared-texture allocation does not mean FG dispatch
+    // succeeded. Simulate Configure/Prepare/Dispatch errors in sequence.
+    FgRetry providerErrors;
+    providerErrors.ObserveScene(1920,1080,1280,720);
+    providerErrors.ObserveBackbuffer(1920,1080);
+    uint64_t retryTime = 1000;
+    for(uint32_t failure=1;failure<=FgRetry::MaxFailures;++failure) {
+        assert(providerErrors.Ready(retryTime));
+        const auto delay = providerErrors.Failed(retryTime,false);
+        if(failure<FgRetry::MaxFailures) {
+            assert(delay==500u<<(failure-1));
+            assert(!providerErrors.Ready(retryTime+delay-1));
+            retryTime+=delay;
+        } else {
+            assert(delay==0);
+            assert(!providerErrors.Ready(retryTime+60000));
+        }
+    }
+    providerErrors.ObserveBackbuffer(1920,1080);
+    assert(!providerErrors.Ready(retryTime+60000));
+    providerErrors.ObserveBackbuffer(1600,900);
+    assert(providerErrors.Ready(retryTime));
+    providerErrors.Failed(retryTime,false);
+    assert(!providerErrors.Ready(retryTime));
+    providerErrors.Recovered(); // Only a successful FG dispatch resets the budget.
+    assert(providerErrors.Ready(retryTime));
     float prevForward[3]{0,0,1};
     float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
     float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
@@ -177,6 +253,13 @@ int main() {
     assert(hooked.Find(&first[8]) == &original1);
     assert(hooked.Find(&second[8]) == &original2);
     assert(hooked.Find(&second[22]) == nullptr);
+    PresentHookRetry presentProbe;
+    assert(presentProbe.Allow(1000));
+    assert(!presentProbe.Allow(1001));
+    assert(!presentProbe.Allow(5999));
+    assert(presentProbe.Allow(6000));
+    assert(!presentProbe.Allow(6001));
+    assert(presentProbe.Allow(100)); // permit re-probe if the monotonic clock resets
     FgDropNotice dropNotice;
     int gameChain=0, gameChain1=0, otherChain=0;
     dropNotice.SetTarget(&gameChain,&gameChain1);

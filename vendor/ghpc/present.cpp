@@ -9,7 +9,9 @@
 #include <mutex>
 #include "GakuPlugin.h"
 #include "../../src/PresentHookSlots.h"
+#include "../../src/PresentHookRetry.h"
 #include "../../src/PresentRate.h"
+#include "../../src/LiveTiming.h"
 #include "../../src/NativeSwapchain.h"
 
 using Microsoft::WRL::ComPtr;
@@ -33,12 +35,49 @@ namespace
 	CreateForHwndFn g_createForHwnd = nullptr;
 	std::atomic<bool> g_capture{ false };
 	std::atomic<bool> g_tryNative{ false };
-	bool g_tried = false;
+	PresentHookRetry g_probeRetry;
 	std::atomic<bool> g_hooked{ false };
 	std::atomic<HWND> g_window{ nullptr };
 	std::atomic<uint64_t> g_presents{ 0 };
 	std::atomic<uint64_t> g_realFrames{ 0 }, g_generatedFrames{ 0 };
+	std::mutex g_timingLock;
+	LiveTimingTracker g_liveTiming;
+	std::mutex g_inputHookLock;
+	HHOOK g_inputHook = nullptr;
+	std::atomic<HWND> g_inputWindow{ nullptr };
+	uint64_t g_nextInputHookAttempt = 0;
 	thread_local bool g_inHook = false;
+
+	bool IsInputMessage(UINT message)
+	{
+		switch (message) {
+		case WM_INPUT:
+		case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+		case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+		case WM_MBUTTONDOWN: case WM_MBUTTONUP:
+		case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+		case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+		case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+			return true;
+		default: return false;
+		}
+	}
+
+	LRESULT CALLBACK GameInputMessageHook(int code, WPARAM remove, LPARAM parameter)
+	{
+		if (code >= 0 && remove == PM_REMOVE && parameter) {
+			const MSG* message = reinterpret_cast<const MSG*>(parameter);
+			if (message->hwnd == g_inputWindow.load(std::memory_order_relaxed) &&
+				IsInputMessage(message->message)) {
+				LARGE_INTEGER at{};
+				if (QueryPerformanceCounter(&at)) {
+					std::lock_guard<std::mutex> lock(g_timingLock);
+					g_liveTiming.ObserveInput(static_cast<uint64_t>(at.QuadPart));
+				}
+			}
+		}
+		return CallNextHookEx(nullptr, code, remove, parameter);
+	}
 
 	void* OriginalSlot(IDXGISwapChain* chain, size_t index)
 	{
@@ -74,6 +113,8 @@ namespace
 	HRESULT PresentWrapped(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
 		const DXGI_PRESENT_PARAMETERS* parameters)
 	{
+		LARGE_INTEGER appEntry{};
+		QueryPerformanceCounter(&appEntry);
 		HRESULT hr;
 		bool ours = false;
 		if (!g_inHook)
@@ -84,8 +125,11 @@ namespace
 			if (!ours) hr = original(sc, sync, flags, parameters);
 			if (hr == S_OK && !(flags & DXGI_PRESENT_TEST)) {
 				DXGI_SWAP_CHAIN_DESC desc{};
-				if (SUCCEEDED(sc->GetDesc(&desc)) && IsGameFpsWindow(desc.OutputWindow))
+				if (SUCCEEDED(sc->GetDesc(&desc)) && IsGameFpsWindow(desc.OutputWindow)) {
 					CountPresentFrames(1, 0);
+					RecordGamePresentQpc(static_cast<uint64_t>(appEntry.QuadPart));
+					StartGameInputHook(desc.OutputWindow);
+				}
 			}
 			g_inHook = false;
 			return hr;
@@ -161,6 +205,7 @@ namespace
 			return false;
 		}
 		g_window = window;
+		StartGameInputHook(window);
 		return true;
 	}
 
@@ -205,8 +250,9 @@ namespace
 
 	void Hook(ID3D11Resource* any)
 	{
-		if (g_tried) return;
-		g_tried = true;
+		// A temporary window or DXGI chain can fail while Unity is starting up.
+		// Keep probing after a cooldown until at least one vtable is hooked.
+		if (g_hooked || !g_probeRetry.Allow(GetTickCount64())) return;
 		ComPtr<ID3D11Device> dev;
 		any->GetDevice(&dev);
 		ComPtr<IDXGIDevice> xd;
@@ -290,4 +336,59 @@ void CountPresentFrames(uint64_t real, uint64_t generated) {
 
 PresentCounts ReadPresentCounts() {
 	return {g_realFrames.load(std::memory_order_relaxed), g_generatedFrames.load(std::memory_order_relaxed)};
+}
+
+void RecordGamePresentQpc(uint64_t at) {
+	LARGE_INTEGER frequency{};
+	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return;
+	std::lock_guard<std::mutex> lock(g_timingLock);
+	g_liveTiming.ObservePresent(at, static_cast<uint64_t>(frequency.QuadPart));
+}
+
+LiveTimingSummary ReadLiveTiming() {
+	LARGE_INTEGER now{}, frequency{};
+	if (!QueryPerformanceCounter(&now) || !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return {};
+	std::lock_guard<std::mutex> lock(g_timingLock);
+	auto result = g_liveTiming.Snapshot(static_cast<uint64_t>(now.QuadPart),
+		static_cast<uint64_t>(frequency.QuadPart));
+	result.inputHookActive = g_inputWindow.load(std::memory_order_relaxed) != nullptr;
+	return result;
+}
+
+void StartGameInputHook(void* window) {
+	HWND hwnd = static_cast<HWND>(window);
+	if (!hwnd || g_inputWindow.load(std::memory_order_relaxed) == hwnd) return;
+	DWORD processId = 0;
+	const DWORD threadId = GetWindowThreadProcessId(hwnd, &processId);
+	if (!threadId || processId != GetCurrentProcessId()) return;
+	std::lock_guard<std::mutex> lock(g_inputHookLock);
+	if (g_inputWindow.load(std::memory_order_relaxed) == hwnd) return;
+	const uint64_t now = GetTickCount64();
+	if (now < g_nextInputHookAttempt) return;
+	if (g_inputHook) {
+		UnhookWindowsHookEx(g_inputHook);
+		g_inputHook = nullptr;
+		g_inputWindow = nullptr;
+	}
+	// Thread-local to this process's Unity window; never install a desktop-wide hook.
+	g_inputHook = SetWindowsHookExW(WH_GETMESSAGE, &GameInputMessageHook, nullptr, threadId);
+	if (!g_inputHook) {
+		g_nextInputHookAttempt = now + 5000;
+		BridgeLog("Input timing: Unity message hook unavailable (error %lu).", GetLastError());
+		return;
+	}
+	g_inputWindow = hwnd;
+	g_nextInputHookAttempt = 0;
+}
+
+void StopGameInputHook() {
+	std::lock_guard<std::mutex> hookLock(g_inputHookLock);
+	g_inputWindow = nullptr;
+	if (g_inputHook) {
+		UnhookWindowsHookEx(g_inputHook);
+		g_inputHook = nullptr;
+	}
+	g_nextInputHookAttempt = 0;
+	std::lock_guard<std::mutex> timingLock(g_timingLock);
+	g_liveTiming.Reset();
 }

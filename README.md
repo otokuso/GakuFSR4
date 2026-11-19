@@ -55,6 +55,20 @@ RX 9070 XTで、ゲーム内の縦画面に対してFSR 4.1.2とFSR Frame Genera
 
 ゲーム起動後にF1でGakuLoaderを開き、`GakuFSR4` パネルを選びます。FSR 4の有効・無効、フレーム生成、プリセット、シャープネス（0〜100%）を変更し、`Save settings` を押してください。同じINIファイルに保存され、ゲームの次回起動時に反映されます。
 
+同じ画面の `Live frame pacing / input timing` を開くと、ゲームの実フレームのPresent呼び出し間隔（中央値・p95・p99・標準偏差）と、キーボード・マウス入力イベントを受け取ってから次のPresentを開始するまでの時間（中央値・p95）を、直近10秒分について確認できます。統計は約2秒ごとに更新され、サンプル数 `n` も表示されます。入力を検出できないゲームでは `--` のままになります。
+
+画面内の数値は**アプリ側の参考値**です。FGで生成したフレームの実表示間隔や、操作してから画面に映るまでの全遅延は測れません。表示側まで含む比較には、次のPresentMon測定を使ってください。
+
+## フレームペーシング・入力遅延の測定
+
+PresentMon 2.xの記録CSVから、実際の表示フレーム間隔（p95/p99、ばらつき）と、キーボード・マウス入力から画面表示までのソフトウェア推定遅延（中央値/p95）を一括比較できます。AMD公式SwapChainの補間フレームを入力遅延の測定対象に混ぜないよう、既定では実ゲームフレームを集計します。
+
+```powershell
+python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv manual-fg.csv native-fg.csv
+```
+
+実際の画面走査や液晶画素応答まで含む物理的な遅延は測れません。記録方法・各指標の意味・フレーム単位のCSV出力は[ベンチマーク手順](docs/BENCHMARKING.md#measure-frame-pacing-and-input-latency-on-the-same-presentmon-capture)を参照してください。
+
 ## ライセンス
 
 ソースはGPL-3.0です。第三者コンポーネントは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。

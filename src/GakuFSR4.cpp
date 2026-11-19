@@ -781,6 +781,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         if(x<0||y<0||w<0||h<0||((w==0)!=(h==0))||(!w&&(x||y))) {
             Log("Invalid FGViewport override; skipping frame generation",GAKU_LOG_WARNING);
             frameGeneration=false;
+            FSR4_StopFrameGenerationTimer();
         } else {
             FSR4_SetFgViewportOverride(x,y,w,h);
         }
@@ -828,6 +829,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    StopGameInputHook();
     renderWork.CancelPackets();
     FSR4_StopFrameGenerationTimer();
     primaryCamera.Reset();
