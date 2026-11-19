@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "ResourceLifetime.h"
 #include "MipBias.h"
 #include "PrimaryCamera.h"
 #include "TaaJitter.h"
@@ -173,12 +174,44 @@ struct Surface {
         if(!handle.Get()) throw std::runtime_error("RTHandles.Alloc failed");
     }
 };
-struct Resources {
+struct Surfaces {
     Surface color,depth,motion,output;
+    void Release() { color.Release(); depth.Release(); motion.Release(); output.Release(); }
+    void ClearRoots() {
+        for(auto* s:{&color,&depth,&motion,&output}) { s->handle.Clear(); s->texture.Clear(); }
+    }
+};
+struct Resources : Surfaces {
+    std::unique_ptr<ResourceLifetime> lifetime=std::make_unique<ResourceLifetime>();
+    struct Retired {
+        Surfaces surfaces;
+        std::unique_ptr<ResourceLifetime> lifetime;
+    };
+    std::vector<Retired> retired;
+    void Reap() {
+        for(auto it=retired.begin();it!=retired.end();) {
+            if(it->lifetime->InUse()) { ++it; continue; }
+            it->surfaces.Release();
+            it=retired.erase(it);
+        }
+    }
+    void ClearIdleRoots() {
+        if(!lifetime->InUse()) ClearRoots();
+        for(auto& old:retired) if(!old.lifetime->InUse()) old.surfaces.ClearRoots();
+    }
     int w=0,h=0,dw=0,dh=0;
     void Ensure(int rw,int rh,int displayW,int displayH) {
         if(w==rw&&h==rh&&dw==displayW&&dh==displayH) return;
-        color.Release(); depth.Release(); motion.Release(); output.Release();
+        Reap();
+        if(lifetime->InUse()) {
+            // Allocate before moving ownership so allocation failure leaves the old roots intact.
+            auto next=std::make_unique<ResourceLifetime>();
+            auto& old=retired.emplace_back();
+            old.surfaces=std::move(static_cast<Surfaces&>(*this));
+            old.lifetime=std::move(lifetime);
+            lifetime=std::move(next);
+            Log("Retained old RTHandles for queued render commands");
+        } else Release();
         w=h=dw=dh=0;
         color.Create(rw,rh,2); depth.Create(rw,rh,14); motion.Create(rw,rh,13);
         output.Create(displayW,displayH,2,true);
@@ -188,6 +221,34 @@ struct Resources {
 };
 // The plugin is process-resident; never invoke IL2CPP from a CRT/DLL detach destructor.
 Resources& resources=*new Resources;
+std::atomic<unsigned> pendingResourceUses{0};
+void __stdcall CompleteResourceUse(int,P data) {
+    static_cast<ResourceLifetime*>(data)->Complete();
+    pendingResourceUses.fetch_sub(1,std::memory_order_release);
+}
+struct ResourceUse {
+    P cmd=nullptr;
+    ResourceLifetime* lifetime=nullptr;
+    void Begin(P commandBuffer) {
+        if(pendingResourceUses.load(std::memory_order_acquire)>=32)
+            throw std::runtime_error("Render resource completion events are not being consumed");
+        cmd=commandBuffer;
+        lifetime=resources.lifetime.get();
+        lifetime->Begin();
+        pendingResourceUses.fetch_add(1,std::memory_order_relaxed);
+    }
+    ~ResourceUse() {
+        if(!lifetime) return;
+        try {
+            // Place the marker after Unity has recorded the last use of the output.
+            QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
+                reinterpret_cast<P>(&CompleteResourceUse),2,lifetime);
+        } catch(...) {
+            // A lost marker cannot safely be treated as completion.
+            renderFailed=true;
+        }
+    }
+};
 
 using InitFn=void(*)(P,P,bool,P,M);
 using TaaFn=void(*)(P,P,P,P,P,P,M);
@@ -317,6 +378,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     if(!enabled||renderFailed||!motion||!At<bool>(cd,field.resolve)) {
         originalTaa(cmd,material,cd,src,dst,motion,mi); return;
     }
+    ResourceUse use;
     static int blockedCamera=0,retryFrame=0;
     int frame=0,id=0;
     const bool offscreen=At<P>(cd,field.target)!=nullptr;
@@ -350,6 +412,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
             if(!LiveTexture(resources.color.texture.Get()) || !LiveTexture(resources.output.texture.Get()))
                 resources.w=0;
             resources.Ensure(w,h,w,h);
+            use.Begin(cmd);
             stage="copy scene color";
             BlitCamera(cmd,src,resources.color.handle.Get());
             stage="queue FSR frame";
@@ -440,6 +503,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
 }
 
 void Final(P self,P cmd,P rd,M mi) {
+    ResourceUse use;
     P cd=static_cast<char*>(rd)+field.renderCamera;
     struct Restore {
         P cd,self,source=nullptr;
@@ -468,6 +532,7 @@ void Final(P self,P cmd,P rd,M mi) {
             if(w!=At<int>(desc,field.descWidth)||h!=At<int>(desc,field.descHeight))
                 throw std::runtime_error("Scaled RTHandles are not supported by this integration");
             resources.Ensure(w,h,dw,dh);
+            use.Begin(cmd);
             BlitCamera(cmd,source,resources.color.handle.Get());
             QueueFrame(cmd,cd,w,h,dw,dh);
 
@@ -483,6 +548,7 @@ void Final(P self,P cmd,P rd,M mi) {
 }
 
 void ResolveBlit(P cmd,P cd,P src,P dst,int load,int store,P material,int pass,M mi) {
+    ResourceUse use;
     P input=src;
     try {
         if(enabled && !renderFailed && ratio>1 && capture.frame>=0 &&
@@ -499,6 +565,7 @@ void ResolveBlit(P cmd,P cd,P src,P dst,int load,int store,P material,int pass,M
                 if(!LiveTexture(resources.color.texture.Get()) || !LiveTexture(resources.output.texture.Get()))
                     resources.w=0;
                 resources.Ensure(w,h,dw,dh);
+                use.Begin(cmd);
                 BlitCamera(cmd,src,resources.color.handle.Get());
                 QueueFrame(cmd,cd,w,h,dw,dh);
                 input=resources.output.handle.Get();
@@ -706,6 +773,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
 }
 void Tick(P,float) {
     try {
+        resources.Reap();
         if(enabled&&!attempted) { attempted=true; Bind(); }
         char line[1024];for(int i=0;i<24&&FSR4_PollLog(line,sizeof line)>0;++i) Log(line);
         if(renderFailed.exchange(false)) Stop("FSR backend failed (see bridge log)");
@@ -726,11 +794,10 @@ void Shutdown(P) {
     enabled=false;
     FSR4_StopFrameGenerationTimer();
     primaryCamera.Reset();
-    // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
-    for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
-        s->handle.Clear();s->texture.Clear();
-    }
+    resources.ClearIdleRoots();
+    if(pendingResourceUses.load(std::memory_order_acquire))
+        Log("Keeping RTHandles with pending render commands until process exit",GAKU_LOG_WARNING);
 }
 }
 
