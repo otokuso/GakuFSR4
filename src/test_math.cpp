@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "ResourceLifetime.h"
 #include "FsrProvider.h"
 #include "FgErrorBurst.h"
 #include "FgRetry.h"
@@ -29,6 +30,16 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    ResourceLifetime oldTextures, newTextures;
+    oldTextures.Begin();
+    oldTextures.Begin();
+    newTextures.Begin();
+    newTextures.Complete();
+    assert(!newTextures.InUse() && oldTextures.InUse());
+    oldTextures.Complete();
+    assert(oldTextures.InUse());
+    oldTextures.Complete();
+    assert(!oldTextures.InUse());
     assert(ParseFsrProviderVersion("4.1.2").valid);
     assert(ParseFsrProviderVersion("4.1").valid);
     assert(!ParseFsrProviderVersion("4.").valid);
