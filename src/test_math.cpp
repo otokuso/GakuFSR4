@@ -18,6 +18,13 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(FsrRecommendedJitterPhases(1.5f)==18);
+    assert(FsrRecommendedJitterPhases(1.7f)==23);
+    assert(FsrRecommendedJitterPhases(2.0f)==32);
+    assert(FsrRecommendedJitterPhases(3.0f)==72);
+    auto fsrCycleA=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,1,18,true);
+    auto fsrCycleB=RepairTaaJitter(0,0,1920,1080,1280,720,19,0,1,18,true);
+    assert(std::abs(fsrCycleA.x-fsrCycleB.x)<0.000001f && std::abs(fsrCycleA.y-fsrCycleB.y)<0.000001f);
     auto generated=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,1.0f);
     assert(std::isfinite(generated.x) && std::isfinite(generated.y));
     assert(std::fabs(generated.x)+std::fabs(generated.y)>0);
