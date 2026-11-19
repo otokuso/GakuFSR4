@@ -20,6 +20,12 @@ constexpr bool RetryCamera(int camera, int blockedCamera, int frame, int retryFr
     return camera != blockedCamera || frame >= retryFrame;
 }
 
+// The existing RTHandle pair has display dimensions only in NativeAA mode.
+// Earlier upscaling at ratio > 1 requires rebuilding URP's later post passes.
+constexpr bool EarlyNativeAA(bool requested, bool offscreen, float ratio) {
+    return requested && !offscreen && ratio==1.0f;
+}
+
 inline int RenderSize(int display, float ratio) {
     if (display < 1 || display > 16384 || !std::isfinite(ratio) || ratio < 1 || ratio > 3)
         throw std::runtime_error("Invalid render dimensions or ratio");
