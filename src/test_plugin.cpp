@@ -52,7 +52,10 @@ int wmain(int argc,wchar_t** argv){
        query(1,1,&descriptor)!=GAKU_E_SIZE||query(1,sizeof descriptor,nullptr)!=GAKU_E_INVALID_ARGUMENT||
        query(1,sizeof descriptor,&descriptor)!=GAKU_OK) return 5;
     GakuHostApi host{1,sizeof host,nullptr,Query,nullptr};void* state=nullptr;
-    if(descriptor.activate(&host,&state)!=GAKU_OK) return 6;
+    const GakuStatus activation=descriptor.activate(&host,&state);
+    // Hosted Windows CI has no AMD runtime DLLs. The settings panel is still
+    // initialized, but activation must fail gracefully in that environment.
+    if(activation!=GAKU_OK&&activation!=GAKU_E_UNAVAILABLE) return 6;
     auto* imgui=ImGui::CreateContext();
     ImGui::GetIO().IniFilename=nullptr;
     ImGui::GetIO().DisplaySize=ImVec2(640,480);
@@ -67,12 +70,19 @@ int wmain(int argc,wchar_t** argv){
     ImGui::Render();
     if(uiBindings!=1 || !ImGui::GetDrawData()->TotalVtxCount) return 9;
     ImGui::DestroyContext(imgui);
-    descriptor.onTick(state,0.016f);
-    descriptor.onTick(state,0.016f);
-    bool stopped=false;
-    for(auto& message:messages){ puts(message.c_str());if(message.find("Missing il2cpp_domain_get")!=std::string::npos) stopped=true; }
-    if(!stopped||hookRequests) return 7;
-    descriptor.shutdown(state);
-    puts("PASS: plugin ABI, settings panel draw, unavailable-runtime failover; no game started.");
+    bool failover=false;
+    if(activation==GAKU_OK) {
+        descriptor.onTick(state,0.016f);
+        descriptor.onTick(state,0.016f);
+        for(auto& message:messages)
+            if(message.find("Missing il2cpp_domain_get")!=std::string::npos) failover=true;
+        descriptor.shutdown(state);
+    } else {
+        for(auto& message:messages)
+            if(message.find("AMD FSR DLL loading failed")!=std::string::npos) failover=true;
+    }
+    for(auto& message:messages) puts(message.c_str());
+    if(!failover||hookRequests) return 7;
+    puts("PASS: plugin ABI, settings panel draw and unavailable-runtime failover; no game started.");
     return 0;
 }
