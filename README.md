@@ -1,74 +1,231 @@
 # GakuFSR4
 
-学園アイドルマスターのWindows版向けFSR 4 MODです。[GakuLoader](https://github.com/Gaku-Mod-Tools/GakuLoader)のプラグインとして動作します。
+[![Windows build and tests](https://github.com/otokuso/GakuFSR4/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/otokuso/GakuFSR4/actions/workflows/windows-ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-既定のQualityモードでは、3Dを出力解像度の各辺約2/3で描き、FSR 4.1.2で拡大します。FSR Frame Generation 4.0.2を有効にすると、対応する3Dシーンで実フレームの間に補間フレームを1枚表示します。
+**『学園アイドルマスター』Windows版で AMD FidelityFX Super Resolution 4（FSR 4）と Frame Generation（FG）を試すための、[GakuLoader](https://github.com/Gaku-Mod-Tools/GakuLoader) 向け非公式プラグインです。**
 
-## ビルド
+ゲームの Direct3D 11 描画から必要な情報を取得し、別の Direct3D 12 デバイス上で FSR 4 のアップスケーリングを実行します。FGを有効にすると、条件が合う場面で実フレームの間に補間フレームを1枚挿入します。
 
-Windows x64、Visual Studio 2022 C++ Build Tools、Windows SDK、CMakeが必要です。
+> [!WARNING]
+> **開発・検証中のMODです。** RX 9070 XTでの動作報告はありますが、ほかのGPUやドライバー、画面モードでの動作を保証するものではありません。ゲーム更新で使えなくなる場合があります。導入・使用は自己責任で行ってください。
+
+## できること
+
+| 機能 | 現在の状態 |
+| --- | --- |
+| **FSR 4 アップスケーリング** | Native AA / Quality / Balanced / Performance / Ultra Performance に対応。FSR 4.1.2で実機動作を確認 |
+| **FSR Frame Generation** | 対応する3Dシーンで最大2倍相当の表示フレームを生成。FSR FG 4.0.2で実機動作を確認。初期設定ではOFF |
+| **2種類のFG表示経路** | 手動Present方式（既定）と、実験的なAMD公式SwapChain方式を切り替え可能 |
+| **GakuLoader内の設定画面** | F1メニューからFSR、FG、画質プリセット、シャープネスを設定可能 |
+| **動作状況・タイミング表示** | 実ゲームFPSとPresent FPS、FGのスキップ理由、処理時間、CPU側のフレーム間隔・入力タイミングなどを表示 |
+
+画質やFPSの改善幅は、解像度・シーン・GPU負荷・画面の更新設定に左右されます。「FGをONにしたら常に2倍のFPSが出る」という意味ではありません。
+
+## 動作環境と必要なもの
+
+- 『学園アイドルマスター』Windows版と、導入済みの **[GakuLoader](https://github.com/Gaku-Mod-Tools/GakuLoader)**。
+- AMD FSR 4に対応するRadeon GPU。現時点でのゲーム内検証環境は **Radeon RX 9070 XT / Windows 11** です。
+- **FG 4.0.2には Windows 11 と Radeon RX 9000シリーズ以降が必要**です。
+- **AMD FidelityFX SDK v2.4.0の署名付きランタイムDLL**。ゲーム本体やGakuLoaderには含まれていません。
+- ソースからビルドする場合は、Windows x64、Visual Studio 2022 C++ Build Tools、Windows SDK、CMake。
+
+> [!NOTE]
+> 現在、GitHub Releasesにはビルド済み配布ファイルがありません。下記の手順でソースをビルドしてください。AMDのDLLはこのリポジトリで再配布していません。
+
+## インストール
+
+### 1. GakuFSR4をビルドする
+
+PowerShellで実行します。
 
 ```powershell
+git clone https://github.com/otokuso/GakuFSR4.git
+cd GakuFSR4
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-## 導入
+成功すると `build/Release/GakuFSR4.dll` が生成されます。`ctest` は主にロジック・プラグインの動作を確認するテストで、実ゲームの画質やGPU互換性までは検証しません。
 
-GakuLoader導入済みのゲームフォルダーへ以下のファイルを配置します。
+### 2. AMD公式ランタイムを入手する
 
-| ファイル | 配置先 |
+[AMD FidelityFX SDK v2.4.0 / signedbin](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin) から、次のファイルを取得します。
+
+- `amd_fidelityfx_loader_dx12.dll`
+- `amd_fidelityfx_upscaler_dx12.dll`
+- `amd_fidelityfx_framegeneration_dx12.dll`（FGを使う場合のみ）
+
+DLLは公式配布元から取得してください。第三者サイトのDLLセットを使う必要はありません。
+
+### 3. ゲームフォルダーに配置する
+
+以下の `ゲームフォルダー` は、**GakuLoaderが導入されているゲームのルートディレクトリ**を指します。
+
+| ファイル | 配置先（ゲームフォルダーからの相対パス） |
 | --- | --- |
-| `build/Release/GakuFSR4.dll` | `GakuLoader/plugins/` |
-| `gakufsr4.ini` | `GakuLoader/Configs/` |
-| `amd_fidelityfx_loader_dx12.dll` と `amd_fidelityfx_upscaler_dx12.dll` | `GakuLoader/PluginData/gakufsr4/` |
-| `amd_fidelityfx_framegeneration_dx12.dll`（フレーム生成を使う場合） | `GakuLoader/PluginData/gakufsr4/` |
+| ビルドした `GakuFSR4.dll` | `GakuLoader/plugins/GakuFSR4.dll` |
+| リポジトリの `gakufsr4.ini` | `GakuLoader/Configs/gakufsr4.ini` |
+| AMDの `amd_fidelityfx_loader_dx12.dll` | `GakuLoader/PluginData/gakufsr4/` |
+| AMDの `amd_fidelityfx_upscaler_dx12.dll` | `GakuLoader/PluginData/gakufsr4/` |
+| AMDの `amd_fidelityfx_framegeneration_dx12.dll` | `GakuLoader/PluginData/gakufsr4/`（FG使用時） |
 
-AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)から取得してください。GakuLoaderとゲーム本体は別途必要です。
-
-`gakufsr4.ini` の `Preset=Quality` を編集してプリセットを選べます。選択肢は `NativeAA`（1.0倍）、`Quality`（1.5倍）、`Balanced`（1.7倍）、`Performance`（2.0倍）、`UltraPerformance`（3.0倍）です。倍率は出力解像度と内部描画解像度の各辺の比です。
-
-`Preset` が未指定なら、旧版の `Ratio` 設定が使われます。プリセット名が認識できない場合はQualityになります。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
-
-FSR 4.xのプロバイダーが複数ある場合は、利用可能な中でバージョン番号が最も新しいものを選びます。特定バージョンで検証したい場合は、INIの `[FSR4]` に `ProviderVersion=4.1.2` のように指定してください。指定版がなければFSRを開始せず、ログで理由を確認できます。省略すると自動選択に戻ります（FSR 3への自動フォールバックはしません）。
-
-モーションベクトルの上下方向の検証用に `MotionVectorYSign=-1`（既定）または `MotionVectorYSign=1` を設定できます。Unity/URPの実際の符号が未検証のため、既定の符号は変更していません。上下移動する被写体を同じ条件で比較し、残像や輪郭の揺れを確認してください。
-
-ジッターの座標系を比較する場合は `JitterXSign` / `JitterYSign` にそれぞれ `-1`（既定）か `1` を設定できます。変更時は射影行列・画面上のサブピクセル移動・FSRに渡す値が一致するかを同一フレームで検証してください。現時点で正しい符号は実機確認できておらず、既定の符号は変更していません。
-
-画質比較専用の実験設定として `JitterPhaseMode=1` を指定すると、FSR倍率に合わせてジッター周期を変えます（Quality 18、Balanced 23、Performance 32、UltraPerformance 72）。既定の `0` では Unity の周期を使用します。
-
-対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
-
-フレーム生成は既定で無効です。`FrameGeneration=1` で有効になり、ゲームログの `FSR Frame Generation active` に実際に使ったバージョンが出ます。4.0.2にはWindows 11とRadeon RX 9000シリーズ以降が必要です。縦画面と横画面のSDR表示で、補間フレームを挟める表示間隔があるときに動作します。中央に表示される映像に黒帯が付く場合は、映像部分を補間して黒帯やその上のUIを実フレームから残します。映像部分のUIも補間の対象になります。ウィンドウが小さいときは、カメラの描画解像度を下限に補間の処理解像度を抑えます。
-
-AMD 公式 SwapChain の試験経路は `FrameGeneration=1` と `NativeSwapChain=1` を設定して再起動すると使えます。起動時に対応できない SwapChain は手動 FG に戻ります。動作中に問題が起きた場合は `NativeSwapChain=0` に戻して再起動してください。DAFP の条件と実機での確認状況は [AMD SwapChain 検証](docs/NATIVE_FG_SWAPCHAIN.md) を参照してください。
-
-画面の映像領域が中央以外にある場合の実験用に、`FGViewportX`、`FGViewportY`、`FGViewportW`、`FGViewportH` でバックバッファ内の領域をピクセル単位で指定できます。指定した矩形がバックバッファ外またはシーンのアスペクト比と合わなければFGをスキップします。未指定時は従来の中央アスペクトフィットを使います。実Viewportの自動検出は未実装です。
-
-RX 9070 XTで、ゲーム内の縦画面に対してFSR 4.1.2とFSR Frame Generation 4.0.2の動作を確認しました。
-
-ゲームが垂直同期なしで動作している場合も、FGで補間フレームと実フレームを続けて表示するときは、各フレームをディスプレイの更新に同期させます。
-
-## GakuLoaderで設定
-
-ゲーム起動後にF1でGakuLoaderを開き、`GakuFSR4` パネルを選びます。FSR 4の有効・無効、フレーム生成、プリセット、シャープネス（0〜100%）を変更し、`Save settings` を押してください。同じINIファイルに保存され、ゲームの次回起動時に反映されます。
-
-同じ画面の `Live frame pacing / input timing` を開くと、ゲームの実フレームのPresent呼び出し間隔（中央値・p95・p99・標準偏差）と、キーボード・マウス入力イベントを受け取ってから次のPresentを開始するまでの時間（中央値・p95）を、直近10秒分について確認できます。統計は約2秒ごとに更新され、サンプル数 `n` も表示されます。入力を検出できないゲームでは `--` のままになります。
-
-画面内の数値は**アプリ側の参考値**です。FGで生成したフレームの実表示間隔や、操作してから画面に映るまでの全遅延は測れません。表示側まで含む比較には、次のPresentMon測定を使ってください。
-
-## フレームペーシング・入力遅延の測定
-
-PresentMon 2.xの記録CSVから、実際の表示フレーム間隔（p95/p99、ばらつき）と、キーボード・マウス入力から画面表示までのソフトウェア推定遅延（中央値/p95）を一括比較できます。AMD公式SwapChainの補間フレームを入力遅延の測定対象に混ぜないよう、既定では実ゲームフレームを集計します。
+フォルダーがなければ作成します。配置ミスは付属スクリプトで確認できます（パスは自分の環境に置き換えてください）。
 
 ```powershell
+.\scripts\VerifyRuntimeLayout.ps1 -GameRoot 'C:\path\to\game' -FrameGeneration
+```
+
+FGを使わない場合は `-FrameGeneration` を外します。この検査は**ファイルの有無だけ**を確認します。AMDのバージョンやGPUの対応状況は判定しません。
+
+### 4. ゲームを起動し、動作を確認する
+
+1. ゲームを起動し、3Dシーンを表示します。
+2. **F1** でGakuLoaderを開き、**GakuFSR4** のパネルを選びます。
+3. `Runtime diagnostics` の `FSR provider` や処理済みフレーム数を確認します。
+4. `GakuLoader/Logs/gakuloader.log` で `FSR active` を検索します。FGが実際に動いた場合は `FSR Frame Generation active` も出力されます。
+
+## 画質とフレーム生成の設定
+
+F1メニューのGakuFSR4パネルでは、次の操作ができます。
+
+| 項目 | 内容 |
+| --- | --- |
+| `Enable FSR 4` | FSR処理の有効・無効 |
+| `Preset` | 内部描画解像度のプリセット |
+| `Sharpness` | シャープネス（0～100%） |
+| `Frame Generation (2x)` | FGを有効にする（対応シーンのみ） |
+| `Save settings` | `gakufsr4.ini` へ設定を保存 |
+
+**保存した設定は、ゲームの次回起動時に反映されます。** F1画面から変更できない実験設定はINIを直接編集してください。
+
+### 画質プリセット
+
+| プリセット | 出力解像度 ÷ 内部解像度（各辺） | 内部描画の幅・高さ |
+| --- | ---: | ---: |
+| `NativeAA` | 1.0倍 | 100% |
+| `Quality` **（既定）** | 1.5倍 | 約66.7% |
+| `Balanced` | 1.7倍 | 約58.8% |
+| `Performance` | 2.0倍 | 50% |
+| `UltraPerformance` | 3.0倍 | 約33.3% |
+
+例えば4K出力で`Quality`を選ぶと、3Dをおおむね **2560×1440** で描画し、FSR 4で3840×2160へ拡大します。UIやすべての画面要素が必ずこの内部解像度で描画されるわけではありません。
+
+### INIの基本設定
+
+`GakuLoader/Configs/gakufsr4.ini` の例です。
+
+```ini
+[FSR4]
+Enabled=1
+Preset=Quality
+Sharpness=0.2
+FrameGeneration=0
+NativeSwapChain=0
+```
+
+- `Enabled=0` でプラグインを無効化します。
+- `Sharpness` は `0.0`～`1.0` で指定します（UIでは0～100%）。
+- `FrameGeneration=1` でFGを試します。初期値は `0` です。
+- `NativeSwapChain=1` は**実験的なAMD公式SwapChain方式**を有効にします。`FrameGeneration=1` も必要です。
+- `ProviderVersion=4.1.2` のように指定すると、使うFSR 4.xプロバイダーのバージョンを固定できます。指定版が見つからない場合はFSRを開始しません。省略時は利用可能な4.xのうち最新のバージョンを選びます。**FSR 3への自動切り替えはありません。**
+- 旧設定 `Ratio` は `Preset` が未指定の場合だけ使われます。不明なプリセット名は `Quality` として扱われます。
+
+ジッターやモーションベクトルの符号、NativeAAの処理位置、FGの表示領域・歪み補正といった追加オプションは検証用です。根拠なく変更すると残像や表示崩れにつながります。詳しくは[技術資料](#技術資料と開発)を参照してください。
+
+## Frame Generationの注意点
+
+FGには2つの表示経路があります。
+
+| `NativeSwapChain` | 表示経路 | 特徴 |
+| --- | --- | --- |
+| `0`（既定） | **手動Present** | D3D11のゲーム映像とD3D12側の補間結果を手動で表示。独自のフレーム間隔調整を使用 |
+| `1`（実験） | **AMD公式SwapChain** | AMDのD3D12 SwapChainに表示を委ねる経路。対応しない起動条件では手動方式へフォールバック |
+
+AMD公式SwapChain方式でも、ドライバー側のペーシング機構（DAFP）やVRRの動作が必ず有効になるわけではありません。実機での検証条件と結果は[AMD SwapChain検証記録](docs/NATIVE_FG_SWAPCHAIN.md)にまとめています。動作中に問題が起きた場合は `NativeSwapChain=0` に戻してゲームを再起動してください。
+
+**現時点でのFGの主な制約**
+
+- **SDR / RGBA8の対応するバックバッファ**が対象です。BGRA8、RGB10A2、RGBA16FやHDR表示についてはFG対応が未完成で、未対応条件では実フレーム表示へ戻します。
+- FGの入力には最終的な合成映像を使うため、画面内のUIや字幕まで補間される場合があります。UIを完全に分離して後から合成する処理は未実装です。
+- 黒帯のある画面では中央の映像領域を対象にし、黒帯などを実フレームから残します。中央以外の映像配置に対する自動Viewport検出は未実装です。
+- 表示間隔が短すぎる、対応するシーンを取得できない、GPU側で失敗した等の場合は、補間フレームをスキップします。
+- 画面の切り替え、リサイズ、デバイス喪失、HDRの切り替えなどは引き続き検証が必要です。
+
+見た目に問題がある場合は、まず `FrameGeneration=0` に戻してFSRアップスケーリング単独で比較してください。
+
+## FPS・フレームペーシング・入力遅延を確認する
+
+### F1画面で確認できる値
+
+GakuLoaderのGakuFSR4パネルに、以下の診断情報が表示されます。
+
+| 表示 | 意味 |
+| --- | --- |
+| `Game FPS` | 実ゲームフレームの処理頻度 |
+| `Present FPS (incl. FG)` | FGを含むPresent呼び出しベースの頻度。モニターに表示された実FPSとは限りません |
+| `Game Present gap` | 実ゲームフレームのPresent間隔（中央値 / p95 / p99、ms） |
+| `Pacing jitter (stddev)` | 上記間隔の標準偏差。小さいほど間隔が揃っています |
+| `Input event -> Present start` | 取得できたキーボード・マウスイベントから次の実ゲームPresent開始までの時間（中央値 / p95、ms） |
+| `Runtime diagnostics` | FSR/FGプロバイダー、GPU処理時間、推定VRAM使用量、生成・スキップ数、直近のFGスキップ理由など |
+
+タイミングの集計対象は**直近10秒間の実ゲームフレーム**で、画面内の集計値は約2秒ごとに更新されます。`n` は集計サンプル数です。入力イベントを取得できない環境では `--` になります。
+
+ここでの入力値は、Windowsメッセージとして取得できた入力から**CPU側のPresent開始まで**の参考値です。入力デバイスから実際の画素が発光するまでの全遅延は表しません。FGで生成したフレームの画面表示間隔も、F1画面だけでは測れません。
+
+### 画面に表示されたフレームを測る（PresentMon）
+
+表示FPS、フレーム間隔のp95/p99、入力から表示までのソフトウェア推定遅延を比較するには、[Intel PresentMon 2.x](https://github.com/GameTechDev/PresentMon)で記録したCSVを使います。
+
+1. 同じ3Dシーン・解像度・ドライバー・リフレッシュレートで、**FG OFF / 手動FG / AMD SwapChain FG** を別々に計測します。
+2. PresentMonで対象ゲームのプロセスを指定してCSVへ記録します。FGの判別用に `--track_frame_type` を有効にします。
+3. 次のスクリプトでCSVを比較します。`GAME.exe` とPresentMonのパスは環境に合わせて置き換えてください。
+
+```powershell
+.\PresentMon-2.x-x64.exe --process_name GAME.exe --track_frame_type --timed 45 --terminate_after_timed --output_file manual-fg.csv
 python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv manual-fg.csv native-fg.csv
 ```
 
-実際の画面走査や液晶画素応答まで含む物理的な遅延は測れません。記録方法・各指標の意味・フレーム単位のCSV出力は[ベンチマーク手順](docs/BENCHMARKING.md#measure-frame-pacing-and-input-latency-on-the-same-presentmon-capture)を参照してください。
+このスクリプトは表示フレーム間隔とPresentMon由来の入力遅延推定値を集計します。入力サンプルがないときは遅延を0msとして扱わず、`--require-input` 指定時はエラーになります。実際のクリックから画素応答までを厳密に測定したい場合は、別途光学計測が必要です。
 
-## ライセンス
+採取条件・指標の定義・CSVの扱いは[ベンチマーク手順](docs/BENCHMARKING.md)を参照してください。
 
-ソースはGPL-3.0です。第三者コンポーネントは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
+## うまく動かないとき
+
+| 症状 | 確認すること |
+| --- | --- |
+| F1にGakuFSR4が出ない | `GakuFSR4.dll` の配置先、GakuLoaderの導入状況、ログを確認 |
+| FSRが動作しない | `Enabled=1`、AMDのloader/upscaler DLL、対応GPU、`FSR active` / `AMD FSR DLL loading failed` 等のログを確認 |
+| FGが動作しない | `FrameGeneration=1`、FG用DLL、Windows/GPU要件、SDR/RGBA8形式、`Last FG skip` を確認。条件に合わなければ補間されません |
+| FGで画面が乱れる・カクつく | `NativeSwapChain=0` に戻して再起動し、手動FGと比較。解決しなければ `FrameGeneration=0` で比較 |
+| 設定を変えたのに反映されない | `Save settings` を押したか、正しいINIを編集したか確認し、**ゲームを再起動** |
+| 入力遅延が `--` になる | 入力イベントを取得できないケースがあります。値がない状態であって、遅延がゼロという意味ではありません |
+
+報告するときは、GPU/ドライバー、Windowsのバージョン、ゲームの画面モード、FSR/FG設定、再現手順、関連ログを[Issues](https://github.com/otokuso/GakuFSR4/issues)に添えてください。個人情報やゲーム本体のファイルは投稿しないでください。
+
+## 技術資料と開発
+
+このプロジェクトは、[GHPC-FSR4](https://github.com/marsattackk/GHPC-FSR4) のD3D11/D3D12ブリッジとAMD FidelityFX SDKのAPIを基にしています。ゲーム側のレンダリングフックやGakuLoader連携を追加しています。
+
+| ドキュメント | 内容 |
+| --- | --- |
+| [GPU_TESTING.md](docs/GPU_TESTING.md) | GPU実機検証、検証用実行ファイル、CIで確認できない範囲 |
+| [BENCHMARKING.md](docs/BENCHMARKING.md) | PresentMonによるFPS・ペーシング・入力タイミングの計測 |
+| [NATIVE_FG_SWAPCHAIN.md](docs/NATIVE_FG_SWAPCHAIN.md) | AMD公式SwapChain経路と実機検証記録 |
+| [FRAME_PACING.md](docs/FRAME_PACING.md) | 手動Presentの待機処理・比較計測 |
+| [FG_FORMAT_SUPPORT.md](docs/FG_FORMAT_SUPPORT.md) | FGのバックバッファ形式とHDR制約 |
+| [FG_UI_COMPOSITION.md](docs/FG_UI_COMPOSITION.md) | UI分離・合成に関する現状と未実装部分 |
+| [FG_DISTORTION.md](docs/FG_DISTORTION.md) | FG用の実験的な歪みフィールド |
+| [FSR_BEFORE_POST.md](docs/FSR_BEFORE_POST.md) | NativeAAをポストプロセス前に配置する実験設定 |
+| [MIP_BIAS.md](docs/MIP_BIAS.md) | テクスチャMipバイアスの調査 |
+
+Windows CIはDebug/ReleaseのビルドとCPU側テストを実行します。ゲーム内GPU動作の検証は別途必要です。手動GPUテストのコマンドは[GPU_TESTING.md](docs/GPU_TESTING.md)にあります。
+
+## ライセンスとクレジット
+
+GakuFSR4のソースコードは **[GPL-3.0](LICENSE)** で公開しています。AMDのランタイムDLLはAMDのライセンスに従う別配布物です。
+
+GHPC-FSR4、AMD FidelityFX SDK、GakuLoaderのABIヘッダー、Dear ImGuiなどの出典・ライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を確認してください。
+
+本プロジェクトは非公式のMODであり、ゲームの運営元やAMDによる承認・サポートを意味しません。
