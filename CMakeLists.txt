@@ -23,6 +23,12 @@ add_test(NAME frame_math COMMAND test_math)
 add_executable(test_gpu src/test_gpu.cpp)
 target_compile_features(test_gpu PRIVATE cxx_std_17)
 target_link_libraries(test_gpu PRIVATE d3d11 dxgi)
+add_executable(test_native_swapchain src/test_native_swapchain.cpp)
+target_compile_features(test_native_swapchain PRIVATE cxx_std_17)
+target_include_directories(test_native_swapchain PRIVATE
+  vendor/ghpc/ffx/Kits/FidelityFX/api/include
+  vendor/ghpc/ffx/Kits/FidelityFX/framegeneration/include)
+target_link_libraries(test_native_swapchain PRIVATE d3d11 d3d12 dxgi)
 add_executable(test_plugin src/test_plugin.cpp)
 target_include_directories(test_plugin PRIVATE include)
 target_link_libraries(test_plugin PRIVATE gaku_imgui)
