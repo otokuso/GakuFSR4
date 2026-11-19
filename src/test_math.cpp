@@ -8,6 +8,7 @@
 #include "PresentHookSlots.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
+#include "PrimaryCamera.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
@@ -111,6 +112,19 @@ int main() {
     assert(hooked.Find(&first[8]) == &original1);
     assert(hooked.Find(&second[8]) == &original2);
     assert(hooked.Find(&second[22]) == nullptr);
+    PrimaryCamera camera;
+    assert(camera.Allow(11,10));
+    assert(!camera.Allow(22,10));
+    assert(camera.Allow(11,11));
+    assert(!camera.Allow(22,11));
+    assert(!camera.Allow(22,12)); // retain the first camera across a one-frame gap
+    assert(camera.Allow(22,13)); // first camera disappeared, allow replacement
+    assert(!camera.Allow(11,13));
+    assert(camera.Allow(33,1));
+    assert(!camera.Allow(22,1));
+    assert(camera.Allow(33,2));
+    camera.Reset();
+    assert(camera.Allow(11,14));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
