@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "FsrProvider.h"
 #include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -17,6 +18,14 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(ParseFsrProviderVersion("4.1.2").valid);
+    assert(ParseFsrProviderVersion("4.1").valid);
+    assert(!ParseFsrProviderVersion("4.").valid);
+    assert(!ParseFsrProviderVersion("4.1.bad").valid);
+    assert(!ParseFsrProviderVersion("4.1000000000.1").valid);
+    assert(NewerFsr4Provider(ParseFsrProviderVersion("4.10.0"),ParseFsrProviderVersion("4.9.99")));
+    assert(!NewerFsr4Provider(ParseFsrProviderVersion("3.99.99"),{}));
+    assert(!NewerFsr4Provider(ParseFsrProviderVersion("4.1.1"),ParseFsrProviderVersion("4.1.2")));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
