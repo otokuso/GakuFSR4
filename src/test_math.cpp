@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "MipBias.h"
 #include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -17,6 +18,10 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(std::abs(RecommendedFsrMipBias(1.5f)+1.5849625f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(1.7f)+1.7655347f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(2.0f)+2.0f)<0.00001f);
+    assert(RecommendedFsrMipBias(1.0f)==0.0f);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
