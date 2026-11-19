@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <utility>
 
-bool CaptureGameSwapChain(const GakuHookService& hooks);
+bool CaptureGameSwapChain(const GakuHookService& hooks, bool nativeSwapchain);
 
 namespace gakufsr {
 using P = void*;
@@ -803,7 +803,8 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     nativeAaBeforePost=configEarlyNativeAA && ratio==1.0f;
     if(configEarlyNativeAA && !nativeAaBeforePost)
         Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the normal FSR path",GAKU_LOG_WARNING);
-    if(frameGeneration&&!CaptureGameSwapChain(hooks))
+    const bool nativeSwapchain=GetPrivateProfileIntW(L"FSR4",L"NativeSwapChain",0,config.c_str())==1;
+    if(frameGeneration&&!CaptureGameSwapChain(hooks,nativeSwapchain))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
 }

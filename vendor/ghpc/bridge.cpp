@@ -20,6 +20,7 @@
 #include "ffx_api.h"
 #include "ffx_api_loader.h"
 #include "dx12/ffx_api_dx12.h"
+#include "dx12/ffx_api_framegeneration_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
 #include "../../src/FsrProvider.h"
@@ -29,6 +30,7 @@
 #include "../../src/FgViewportMath.h"
 #include "../../src/ExposurePolicy.h"
 #include "../../src/FgDropNotice.h"
+#include "../../src/NativeSwapchain.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -241,6 +243,17 @@ namespace
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+	struct NativePresentState {
+		IDXGISwapChain4* chain = nullptr;
+		ffxContext swapchainContext = nullptr;
+		ComPtr<ID3D12CommandAllocator> allocator;
+		ComPtr<ID3D12GraphicsCommandList> list;
+		uint64_t fence = 0;
+		std::atomic<uint64_t> generated{0};
+		std::atomic<ffxReturnCode_t> error{FFX_API_RETURN_OK};
+		bool enabled = false;
+	};
+	NativePresentState& nativePresent = *new NativePresentState;
 	FgDropNotice g_fgDropNotice;
 	std::atomic<const char*> g_fgSkipReason{nullptr};
 
@@ -387,7 +400,13 @@ namespace
 			ffxConfigureDescFrameGeneration c = {};
 			c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
 			c.frameGenerationEnabled = false;
-			c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+			c.swapChain = nativePresent.chain;
+			if (nativePresent.chain) {
+				ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 wait = {};
+				wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
+				g.fx.Dispatch(&nativePresent.swapchainContext, &wait.header);
+				nativePresent.enabled = false;
+			} else c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
 			c.frameID = g.fgFrameId;
 			g.fx.Configure(&g.fg, &c.header);
 			g.fx.DestroyContext(&g.fg, nullptr);
@@ -483,12 +502,10 @@ namespace
 		Log("Bridge shut down (%s)%s.", why, idle ? "" : "; its GPU objects abandoned, the queue was not idle");
 	}
 
-	bool InitDevices(ID3D11Resource* any)
+	bool InitDevices(ID3D11Device* dev)
 	{
-		ComPtr<ID3D11Device> dev;
-		any->GetDevice(&dev);
-		g.d11Base = dev.Get();
-		if (!Check(dev.As(&g.d11), "ID3D11Device5 (Windows 10 1703 or later)")) return false;
+		g.d11Base = dev;
+		if (!Check(dev->QueryInterface(IID_PPV_ARGS(&g.d11)), "ID3D11Device5 (Windows 10 1703 or later)")) return false;
 		ComPtr<ID3D11DeviceContext> ic;
 		dev->GetImmediateContext(&ic);
 		if (!Check(ic.As(&g.ctx), "ID3D11DeviceContext4")) return false;
@@ -496,7 +513,7 @@ namespace
 		ComPtr<IDXGIDevice> xd;
 		ComPtr<IDXGIAdapter> ad;
 		DXGI_ADAPTER_DESC ds = {};
-		if (!Check(dev.As(&xd), "IDXGIDevice") || !Check(xd->GetAdapter(&ad), "GetAdapter") || !Check(ad->GetDesc(&ds), "GetDesc")) return false;
+		if (!Check(dev->QueryInterface(IID_PPV_ARGS(&xd)), "IDXGIDevice") || !Check(xd->GetAdapter(&ad), "GetAdapter") || !Check(ad->GetDesc(&ds), "GetDesc")) return false;
 		WideCharToMultiByte(CP_UTF8, 0, ds.Description, -1, g.stats.adapter, sizeof g.stats.adapter, nullptr, nullptr);
 
 		ComPtr<IDXGIFactory4> factory;
@@ -1033,6 +1050,14 @@ void main(uint3 id : SV_DispatchThreadID)
 			displayW = min(displayW, max(g.fgContent.width, keyW));
 			displayH = min(displayH, max(g.fgContent.height, keyH));
 		}
+		if (nativePresent.chain) {
+			DXGI_SWAP_CHAIN_DESC1 desc = {};
+			if (FAILED(nativePresent.chain->GetDesc1(&desc))) return false;
+			displayW = desc.Width;
+			displayH = desc.Height;
+			g.fgContent = g.fgViewportOverrideEnabled ? g.fgViewportOverride : FitScene(displayW, displayH, fd.displayW, fd.displayH);
+			if (!FgViewportWithinBackbuffer(g.fgContent, displayW, displayH, fd.displayW, fd.displayH)) return false;
+		}
 		uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
 		if (g.fg && g.fgDisplayW == displayW && g.fgDisplayH == displayH && g.fgRenderW == keyW && g.fgRenderH == keyH && g.fgFlags == flags) return true;
 		if (!WaitIdle("new FG context")) return false;
@@ -1090,15 +1115,25 @@ void main(uint3 id : SV_DispatchThreadID)
 		mq.gpuMemoryUsageFrameGeneration = &mem;
 		ffxReturnCode_t mrc = g.fx.Query(&g.fg, &mq.header);
 		g.stats.fgMemory = mrc == FFX_API_RETURN_OK ? mem.totalUsageInBytes : 0;
-		Log("FG context: inputs up to %ux%u, display %ux%u, flags 0x%X: provider '%s' (id 0x%llX); GPU memory %.1f MB%s; manual dispatch, presented through the game's swap chain.",
-			keyW, keyH, displayW, displayH, flags, g.stats.fgProvider, (unsigned long long)g.stats.fgProviderId, mem.totalUsageInBytes / 1048576.0, mrc == FFX_API_RETURN_OK ? "" : " (query failed)");
+		Log("FG context: inputs up to %ux%u, display %ux%u, flags 0x%X: provider '%s' (id 0x%llX); GPU memory %.1f MB%s; %s.",
+			keyW, keyH, displayW, displayH, flags, g.stats.fgProvider, (unsigned long long)g.stats.fgProviderId,
+			mem.totalUsageInBytes / 1048576.0, mrc == FFX_API_RETURN_OK ? "" : " (query failed)",
+			nativePresent.chain ? "AMD SwapChain callback" : "manual dispatch, presented through the game's swap chain");
 		return true;
+	}
+
+	ffxReturnCode_t NativeInterpolate(ffxDispatchDescFrameGeneration* params, void*)
+	{
+		const auto result = g.fx.Dispatch(&g.fg, &params->header);
+		if (result == FFX_API_RETURN_OK) nativePresent.generated += params->numGeneratedFrames;
+		else nativePresent.error = result;
+		return result;
 	}
 
 	void FgPrepare(const FrameData& fd, ID3D12GraphicsCommandList* l, uint32_t keyW, uint32_t keyH)
 	{
 		g.fgRetry.ObserveScene(fd.displayW, fd.displayH, keyW, keyH);
-		if (!fd.fg || !g.fgDll || !PresentHooked() || g.fgUnavailable)
+		if (!fd.fg || !g.fgDll || (!PresentHooked() && !nativePresent.chain) || g.fgUnavailable)
 		{
 			if (fd.fg && !PresentHooked()) g_fgSkipReason = "Waiting for a swap chain hook";
 			if (g.fg && WaitIdle("FG off")) DestroyFg();
@@ -1115,6 +1150,13 @@ void main(uint3 id : SV_DispatchThreadID)
 		c.frameGenerationEnabled = true;
 		c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
 		c.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
+		if (nativePresent.chain) {
+			c.swapChain = nativePresent.chain;
+			c.flags = 0;
+			c.frameGenerationCallback = NativeInterpolate;
+			const auto rect = g.fgContent;
+			c.generationRect = { (int32_t)rect.x, (int32_t)rect.y, (int32_t)rect.width, (int32_t)rect.height };
+		}
 		c.frameID = id;
 		ffxConfigureDescFrameGenerationRegisterDistortionFieldResource distortion = {};
 		const bool withDistortion=EnsureFgDistortion(l);
@@ -1133,6 +1175,7 @@ void main(uint3 id : SV_DispatchThreadID)
 			rc=g.fx.Configure(&g.fg,&c.header);
 		}
 		if (rc != FFX_API_RETURN_OK) { FgFailure(1, "configure", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (nativePresent.chain) nativePresent.enabled = true;
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 		p.frameID = id;
@@ -1211,14 +1254,17 @@ void main(uint3 id : SV_DispatchThreadID)
 
 		ComPtr<ID3D11Device> dev;
 		((ID3D11Resource*)fd.color)->GetDevice(&dev);
-		if (g.d12 && dev.Get() != g.d11Base) Teardown("the game's D3D11 device changed");
-		if (!g.d12 && !InitDevices((ID3D11Resource*)fd.color)) { Teardown("could not start"); Fail("the D3D12 side could not be made (above)."); return; }
+		if (g.d12 && dev.Get() != g.d11Base) {
+			if (nativePresent.chain) return;
+			Teardown("the game's D3D11 device changed");
+		}
+		if (!g.d12 && !InitDevices(dev.Get())) { Teardown("could not start"); Fail("the D3D12 side could not be made (above)."); return; }
 		if (!EnsureShared(g.color, (ID3D11Texture2D*)fd.color, false, "color", true)
 			|| !EnsureShared(g.depth, (ID3D11Texture2D*)fd.depth, false, "depth", false)
 			|| !EnsureShared(g.motion, (ID3D11Texture2D*)fd.motion, false, "motion vectors", true)
 			|| !EnsureShared(g.output, (ID3D11Texture2D*)fd.output, true, "output", true)) { Fail("shared textures (above)."); return; }
 		if (!EnsureContext(fd)) { Fail("no FSR context (above)."); return; }
-		if (fd.fg && g.fgDll) InstallPresentHook(static_cast<ID3D11Resource*>(fd.color));
+		if (fd.fg && g.fgDll && !nativePresent.chain) InstallPresentHook(static_cast<ID3D11Resource*>(fd.color));
 
 		int slot = (int)(g.submits % Slots);
 		if (!WaitOut(g.allocFence[slot], FrameWaitMs, "command allocator reuse")) { Fail("the GPU stopped making progress (above)."); return; }
@@ -1340,7 +1386,10 @@ void main(uint3 id : SV_DispatchThreadID)
 	{
 		__try
 		{
-			if (g.teardownDue) { g.teardownDue = false; Teardown("after an exception"); }
+			if (g.teardownDue) {
+				g.teardownDue = false;
+				if (!nativePresent.chain) Teardown("after an exception");
+			}
 			if (eventId == 1 && data)
 			{
 				LARGE_INTEGER t0, t1, f;
@@ -1390,6 +1439,159 @@ void BridgeLog(const char* fmt, ...)
 }
 
 ID3D12CommandQueue* BridgeQueue() { return g.queue.Get(); }
+
+HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND window, DXGI_SWAP_CHAIN_DESC1& desc,
+	const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, NativeSwapchainState& state)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	if (!g.fgDll || nativePresent.chain || (g.d12 && g.d11Base != device)) return DXGI_ERROR_UNSUPPORTED;
+	if (!g.d12 && !InitDevices(device)) {
+		Teardown("native swap chain startup failed");
+		return DXGI_ERROR_UNSUPPORTED;
+	}
+	ComPtr<ID3D11Multithread> multithread;
+	if ((device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) || FAILED(g.ctx.As(&multithread)))
+		return DXGI_ERROR_UNSUPPORTED;
+
+	ComPtr<ID3D12CommandAllocator> allocator;
+	ComPtr<ID3D12GraphicsCommandList> list;
+	HRESULT hr = g.d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+	if (SUCCEEDED(hr)) hr = g.d12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+		allocator.Get(), nullptr, IID_PPV_ARGS(&list));
+	if (SUCCEEDED(hr)) hr = list->Close();
+	if (FAILED(hr)) return hr;
+
+	ffxCreateContextDescFrameGenerationSwapChainVersionDX12 version = {};
+	version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
+	version.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+	ffxCreateContextDescFrameGenerationSwapChainForHwndDX12 create = {};
+	create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
+	create.header.pNext = &version.header;
+	create.swapchain = &state.swapchain;
+	create.gameQueue = g.queue.Get();
+	create.dxgiFactory = factory;
+	create.hwnd = window;
+	create.desc = &desc;
+	DXGI_SWAP_CHAIN_FULLSCREEN_DESC full = {};
+	if (fullscreen) { full = *fullscreen; create.fullscreenDesc = &full; }
+	const auto result = g.fx.CreateContext(&state.context, &create.header, nullptr);
+	if (result != FFX_API_RETURN_OK || !state.swapchain) {
+		Log("AMD native SwapChain startup failed: FFX error %u.", result);
+		if (state.context) g.fx.DestroyContext(&state.context, nullptr);
+		if (state.swapchain) state.swapchain->Release();
+		state = {};
+		return DXGI_ERROR_UNSUPPORTED;
+	}
+	nativePresent.chain = state.swapchain;
+	nativePresent.swapchainContext = state.context;
+	nativePresent.allocator = std::move(allocator);
+	nativePresent.list = std::move(list);
+	nativePresent.fence = 0;
+	nativePresent.generated = 0;
+	nativePresent.error = FFX_API_RETURN_OK;
+	nativePresent.enabled = false;
+	multithread->SetMultithreadProtected(TRUE);
+	ffxQueryGetProviderVersion provider = {};
+	provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+	g.fx.Query(&state.context, &provider.header);
+	Log("Unity AMD native SwapChain active: %ux%u, provider %s, flags 0x%x.",
+		desc.Width, desc.Height, provider.versionName ? provider.versionName : "unknown", desc.Flags);
+	return S_OK;
+}
+
+void DestroyNativeSwapchain(NativeSwapchainState& state)
+{
+	if (!state.context) return;
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	if (nativePresent.chain == state.swapchain) {
+		WaitIdle("native swap-chain shutdown", true);
+		DestroyFg();
+		nativePresent.chain = nullptr;
+		nativePresent.swapchainContext = nullptr;
+		nativePresent.list.Reset();
+		nativePresent.allocator.Reset();
+	}
+	g.fx.DestroyContext(&state.context, nullptr);
+	state.swapchain->Release();
+	state = {};
+}
+
+HRESULT ResizeNativeSwapchain(NativeSwapchainState& state, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	if (!WaitIdle("native swap-chain resize")) return DXGI_ERROR_DEVICE_REMOVED;
+	DestroyFg();
+	return state.swapchain->ResizeBuffers(count, width, height, format, flags);
+}
+
+HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* source, UINT sync, UINT flags,
+	const DXGI_PRESENT_PARAMETERS* parameters)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	const auto present = [&] {
+		return parameters ? state.swapchain->Present1(sync, flags, parameters) : state.swapchain->Present(sync, flags);
+	};
+	if (flags & DXGI_PRESENT_TEST) return present();
+	if (deviceLost || !g.ctx) return DXGI_ERROR_DEVICE_REMOVED;
+	if (nativePresent.enabled && (!g.fgPending || g.failed ||
+		(parameters && (parameters->DirtyRectsCount || parameters->pScrollRect || parameters->pScrollOffset)))) {
+		ffxConfigureDescFrameGeneration c = {};
+		c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+		c.swapChain = state.swapchain;
+		c.frameID = g.fgFrameId;
+		if (g.fx.Configure(&g.fg, &c.header) != FFX_API_RETURN_OK) return E_FAIL;
+		nativePresent.enabled = false;
+		g.fgHavePrevious = false;
+	}
+	g.fgPending = false;
+	if (!WaitOut(nativePresent.fence, FrameWaitMs, "native swap-chain command reuse") ||
+		!EnsureShared(g.present, source, false, "native SwapChain colour", false)) return DXGI_ERROR_DEVICE_REMOVED;
+	auto* allocator = nativePresent.allocator.Get();
+	auto* list = nativePresent.list.Get();
+	HRESULT hr = allocator->Reset();
+	if (SUCCEEDED(hr)) hr = list->Reset(allocator, nullptr);
+	if (FAILED(hr)) return hr;
+	ComPtr<ID3D12Resource> dest;
+	hr = state.swapchain->GetBuffer(state.swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&dest));
+	if (FAILED(hr)) { list->Close(); return hr; }
+	g.ctx->CopyResource(g.present.t11.Get(), source);
+	const auto ready = ++g.inValue;
+	hr = g.ctx->Signal(g.in11.Get(), ready);
+	if (FAILED(hr)) { list->Close(); return hr; }
+	g.ctx->Flush();
+	D3D12_RESOURCE_BARRIER copies[2];
+	Barrier(g.present.t12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE, copies[0]);
+	Barrier(dest.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST, copies[1]);
+	list->ResourceBarrier(2, copies);
+	list->CopyResource(dest.Get(), g.present.t12.Get());
+	for (auto& barrier : copies) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+	list->ResourceBarrier(2, copies);
+	hr = list->Close();
+	if (SUCCEEDED(hr)) hr = g.queue->Wait(g.in12.Get(), ready);
+	if (FAILED(hr)) return hr;
+	ID3D12CommandList* lists[] = {list};
+	g.queue->ExecuteCommandLists(1, lists);
+	const auto done = ++g.outValue;
+	hr = g.queue->Signal(g.out12.Get(), done);
+	if (SUCCEEDED(hr)) hr = g.ctx->Wait(g.out11.Get(), done);
+	if (FAILED(hr)) return hr;
+	nativePresent.fence = done;
+	hr = present();
+	if (SUCCEEDED(hr)) {
+		const auto frames = nativePresent.generated.exchange(0);
+		const auto failure = nativePresent.error.exchange(FFX_API_RETURN_OK);
+		if (failure != FFX_API_RETURN_OK) FgFailure(3, "native SwapChain callback", failure, g.fgFrameId);
+		if (frames) {
+			if (g.stats.fgGenerated == 0) Log("First AMD SwapChain interpolation: SyncInterval=%u, flags=0x%x.", sync, flags);
+			g.stats.fgGenerated += frames;
+			g.stats.fgReal++;
+		}
+		g.fgHavePrevious = nativePresent.enabled;
+		g.stats.presented++;
+		Publish();
+	}
+	return hr;
+}
 
 bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall original,
 	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr);
