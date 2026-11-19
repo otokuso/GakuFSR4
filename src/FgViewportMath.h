@@ -23,3 +23,11 @@ inline FgImageRect FgAspectFit(uint32_t w, uint32_t h, uint32_t sceneW, uint32_t
     const auto height = (std::min)(h, (std::max)(1u, static_cast<uint32_t>(scale * sceneH + 0.5)));
     return {(w - width) / 2, (h - height) / 2, width, height};
 }
+
+inline bool FgViewportWithinBackbuffer(FgImageRect viewport, uint32_t width, uint32_t height,
+                                      uint32_t sceneW, uint32_t sceneH)
+{
+    return viewport.width && viewport.height && viewport.x < width && viewport.y < height &&
+        viewport.width <= width - viewport.x && viewport.height <= height - viewport.y &&
+        FgMatchingAspectRatio(viewport.width, viewport.height, sceneW, sceneH);
+}

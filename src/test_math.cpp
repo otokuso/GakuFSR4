@@ -85,6 +85,9 @@ int main() {
     assert(std::abs(frame_math::Jitter(0.5f/640,1280,1)-0.5f)<0.00001f);
     assert(std::abs(frame_math::Jitter(0.5f/640,1280,-1)+0.5f)<0.00001f);
     auto portraitOnLandscape = FgAspectFit(1920,1080,1080,1920);
+    assert(FgViewportWithinBackbuffer({400,100,1080,608},1920,1080,1920,1080));
+    assert(!FgViewportWithinBackbuffer({1900,100,1080,608},1920,1080,1920,1080));
+    assert(!FgViewportWithinBackbuffer({400,100,1080,608},1920,1080,1080,1920));
     assert(portraitOnLandscape.x==656 && portraitOnLandscape.y==0);
     assert(portraitOnLandscape.width==608 && portraitOnLandscape.height==1080);
     auto landscapeOnPortrait = FgAspectFit(1080,1920,1920,1080);
