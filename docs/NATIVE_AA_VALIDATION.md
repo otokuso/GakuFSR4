@@ -2,8 +2,8 @@
 
 `Preset=NativeAA` uses full-resolution color/depth/motion-vector inputs and
 dispatches the FSR upscaler at a 1:1 render-to-display ratio. It does **not**
-remove the cost of native-resolution game rendering. The following options are
-experiments, not universal image-quality improvements.
+remove the cost of native-resolution game rendering. The screen camera uses
+the TAA pass. The jitter phase modes below are available for comparison.
 
 ## Reproducible A/B matrix
 
@@ -11,12 +11,10 @@ Start with `FrameGeneration=0` and `Sharpness=0` at the same resolution, camera
 angle, game graphics settings, HDR state and provider version. Restart the game
 after changing an option.
 
-| Run | `NativeAABeforePost` | `JitterPhaseMode` | Meaning |
-| --- | --- | --- | --- |
-| A (baseline) | `0` | `0` | Final-pass FSR, Unity 1024-phase Halton |
-| B | `1` | `0` | TAA-pass FSR, unchanged Unity jitter |
-| C | `1` | `2` | TAA-pass FSR, 8-phase Native AA jitter |
-| D | `0` | `2` | Final-pass FSR, 8-phase Native AA jitter |
+| Run | `JitterPhaseMode` | Meaning |
+| --- | --- | --- |
+| A (baseline) | `0` | Unity 1024-phase Halton |
+| B | `2` | FSR 8-phase Native AA jitter |
 
 `JitterPhaseMode=1` uses the FSR ratio-dependent sequence for **all** presets;
 mode `2` changes the sequence only at ratio 1.0. Both are opt-in. The actual
@@ -28,7 +26,7 @@ For each run, capture the same live-scene segment:
 1. Pause/steady camera: hair strands, costume edges, stage LEDs and fine text.
 2. Slow pan: edge shimmer, ghost trails, alpha-blended effects.
 3. Fast cut: first frame after a camera or scene transition, history reset count.
-4. Bright bloom, depth of field and rapid motion: compare the two FSR placements.
+4. Bright bloom, depth of field and rapid motion: check output with each jitter mode.
 5. Repeat with FG enabled and compare real versus generated frames independently.
 
 Use the GakuLoader panel to check **Native AA stage**, **Jitter phases**,

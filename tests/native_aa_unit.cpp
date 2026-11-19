@@ -4,9 +4,9 @@
 #include <cmath>
 
 int main() {
-    assert(frame_math::EarlyNativeAA(true,false,1.0f));
-    assert(!frame_math::EarlyNativeAA(true,true,1.0f));
-    assert(!frame_math::EarlyNativeAA(true,false,1.5f));
+    assert(frame_math::EarlyNativeAA(false,1.0f));
+    assert(!frame_math::EarlyNativeAA(true,1.0f));
+    assert(!frame_math::EarlyNativeAA(false,1.5f));
 
     assert(frame_math::NativeSurfaceDimensions(3840,2160,3840,2160,3840,2160));
     assert(!frame_math::NativeSurfaceDimensions(3840,2160,3840,2159,3840,2160));

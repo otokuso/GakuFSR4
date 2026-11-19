@@ -30,7 +30,6 @@ bool frameGeneration=false;
 int jitterPhaseMode=0;
 int motionVectorYSign=-1;
 int jitterXSign=-1,jitterYSign=-1;
-bool nativeAaBeforePost=false;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -291,7 +290,6 @@ PrimaryCamera primaryCamera;
 NativeAaDiagnostics ReadNativeAaDiagnostics() {
     NativeAaDiagnostics info{};
     info.selected=enabled && ratio==1.0f;
-    info.beforePost=nativeAaBeforePost;
     info.jitterPhases=SelectJitterPhaseCount(jitterPhaseMode,ratio);
     info.beforePostQueued=nativeEarlyQueued.load();
     info.finalQueued=nativeFinalQueued.load();
@@ -410,7 +408,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
     static int blockedCamera=0,retryFrame=0;
     int frame=0,id=0;
     const bool offscreen=At<P>(cd,field.target)!=nullptr;
-    const bool earlyNativeAA=frame_math::EarlyNativeAA(nativeAaBeforePost,offscreen,ratio);
+    const bool earlyNativeAA=frame_math::EarlyNativeAA(offscreen,ratio);
     const char* stage="camera validation";
     try {
         frame=api.Value<int>(method.frame);
@@ -798,7 +796,6 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     }
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
-    const bool configEarlyNativeAA=GetPrivateProfileIntW(L"FSR4",L"NativeAABeforePost",0,config.c_str())!=0;
     wchar_t value[64];
     wchar_t* end=nullptr;
     if(GetPrivateProfileStringW(L"FSR4",L"Preset",L"",value,64,config.c_str())) {
@@ -815,8 +812,7 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     GetPrivateProfileStringW(L"FSR4",L"Sharpness",L"0.2",value,64,config.c_str());
     sharpness=wcstof(value,&end);
     if(!end||end==value||*end||!std::isfinite(sharpness)||sharpness<0||sharpness>1) return GAKU_E_INVALID_ARGUMENT;
-    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness,configFg,
-        configEarlyNativeAA,jitterPhaseMode);
+    InitSettingsUi(host,config.c_str(),configEnabled,ratio,sharpness,configFg,jitterPhaseMode);
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
@@ -853,12 +849,9 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
             Log("Invalid FG radial distortion settings; using normal frame generation",GAKU_LOG_WARNING);
         }
     }
-    nativeAaBeforePost=configEarlyNativeAA && ratio==1.0f;
-    if(configEarlyNativeAA && !nativeAaBeforePost)
-        Log("NativeAABeforePost requires Ratio=1 or Preset=NativeAA; using the normal FSR path",GAKU_LOG_WARNING);
     if(ratio==1.0f)
-        Log(std::string("Native AA route: ")+(nativeAaBeforePost?"screen TAA pass (experimental)":"screen final pass")+
-            "; jitter sequence "+std::to_string(SelectJitterPhaseCount(jitterPhaseMode,ratio))+" phases");
+        Log("Native AA route: screen TAA pass; jitter sequence "+
+            std::to_string(SelectJitterPhaseCount(jitterPhaseMode,ratio))+" phases");
     const bool nativeSwapchain=GetPrivateProfileIntW(L"FSR4",L"NativeSwapChain",0,config.c_str())==1;
     if(!CaptureGameSwapChain(hooks,frameGeneration&&nativeSwapchain))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
