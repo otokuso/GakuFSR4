@@ -20,6 +20,7 @@
 #include "dx12/ffx_api_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
+#include "../../src/FgErrorBurst.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -254,7 +255,7 @@ namespace
 		bool fgPending = false;
 		bool fgPendingReset = false;
 		bool fgHavePrevious = false;
-		int fgErrors = 0;
+		FgErrorBurst fgErrors;
 		LONGLONG fgLastEntry = 0;
 		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
@@ -263,6 +264,17 @@ namespace
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+
+	void FgFailure(int stage, const char* name, ffxReturnCode_t code, uint64_t frameId)
+	{
+		if (g.fgErrors.Record(stage, (uint32_t)code))
+			Log("FG %s failed: %u (frame %llu).", name, (unsigned)code, (unsigned long long)frameId);
+	}
+
+	void FgRecovered()
+	{
+		g.fgErrors.Reset();
+	}
 
 	std::mutex g_statsLock;
 	Stats g_published = {};
@@ -368,6 +380,7 @@ namespace
 
 	void DestroyFg()
 	{
+		FgRecovered();
 		if (g.fg && g.fx.DestroyContext)
 		{
 			ffxConfigureDescFrameGeneration c = {};
@@ -1013,7 +1026,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		c.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
 		c.frameID = id;
 		ffxReturnCode_t rc = g.fx.Configure(&g.fg, &c.header);
-		if (rc != FFX_API_RETURN_OK) { if (++g.fgErrors <= 3) Log("FG configure failed: %u (frame %llu).", rc, (unsigned long long)id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) { FgFailure(1, "configure", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
 		ffxDispatchDescFrameGenerationPrepareV2 p = {};
 		p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
 		p.frameID = id;
@@ -1035,7 +1048,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		memcpy(p.cameraRight, fd.camRight, sizeof p.cameraRight);
 		memcpy(p.cameraForward, fd.camFwd, sizeof p.cameraForward);
 		rc = g.fx.Dispatch(&g.fg, &p.header);
-		if (rc != FFX_API_RETURN_OK) { if (++g.fgErrors <= 3) Log("FG prepare failed: %u (frame %llu).", rc, (unsigned long long)id); g.fgPending = g.fgHavePrevious = false; return; }
+		if (rc != FFX_API_RETURN_OK) { FgFailure(2, "prepare", rc, id); g.fgPending = g.fgHavePrevious = false; return; }
 		g.stats.fgPrepared++;
 		g.fgPending = true;
 		g.fgPendingReset = p.reset;
@@ -1418,13 +1431,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	if (!Check(g.ctx->Wait(g.out11.Get(), done), "D3D11 Wait (FG)")) { Fail("fence (above)."); return false; }
 	if (rc != FFX_API_RETURN_OK)
 	{
-		if (++g.fgErrors <= 3) Log("FG dispatch failed: %u (frame %llu).", rc, (unsigned long long)g.fgFrameId);
+		FgFailure(3, "dispatch", rc, g.fgFrameId);
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		CheckRemoved();
 		return false;
 	}
 	g.fgHavePrevious = true;
+	FgRecovered();
 	if (!showGenerated || !d.numGeneratedFrames) { g.stats.fgSkipped++; return false; }
 
 	g.ctx->CopyResource(bb.Get(), g.gen.t11.Get());
