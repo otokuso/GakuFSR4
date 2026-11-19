@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "MipBias.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -31,6 +32,7 @@ void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
 }
 void Stop(const std::string& why) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
 
@@ -281,6 +283,10 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
             std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)+
             (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")); }
+        static bool reportedBias=false;
+        if(!reportedBias&&ratio>1) { reportedBias=true;Log("FSR recommended Mip LOD bias at ratio "+
+            std::to_string(ratio)+": "+std::to_string(RecommendedFsrMipBias(ratio))+
+            "; informational only (Unity URP may already apply a global Mip Bias)"); }
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 
@@ -630,6 +636,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
