@@ -259,6 +259,8 @@ namespace
 		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
 		bool fgOffLogged = true;
+		uint32_t fgPaceSamples = 0;
+		double fgPaceBusyMs = 0, fgPaceBusyMaxMs = 0, fgPaceLateMs = 0, fgPaceLateMaxMs = 0;
 	};
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
@@ -385,6 +387,8 @@ namespace
 		g.fgPending = g.fgHavePrevious = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
+		g.fgPaceSamples = 0;
+		g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		g.stats.fgProviderId = 0;
 		g.stats.fgProvider[0] = 0;
 		g.stats.fgMemory = 0;
@@ -1047,13 +1051,31 @@ void main(uint3 id : SV_DispatchThreadID)
 		LARGE_INTEGER f, now;
 		QueryPerformanceFrequency(&f);
 		LONGLONG until = from + (LONGLONG)(ms * f.QuadPart / 1000.0);
+		LONGLONG busyStart = 0;
 		for (;;)
 		{
 			QueryPerformanceCounter(&now);
 			LONGLONG left = until - now.QuadPart;
-			if (left <= 0) return;
+			if (left <= 0) break;
 			if (left * 1000.0 / f.QuadPart > 1.5) Sleep(1);
-			else YieldProcessor();
+			else {
+				if (!busyStart) busyStart = now.QuadPart;
+				YieldProcessor();
+			}
+		}
+		// Sample existing behavior before changing the wait strategy; no extra sleeps or yields.
+		const double msPerTick = 1000.0 / f.QuadPart;
+		const double busyMs = busyStart ? (now.QuadPart - busyStart) * msPerTick : 0.0;
+		const double lateMs = (now.QuadPart - until) * msPerTick;
+		g.fgPaceBusyMs += busyMs;
+		g.fgPaceLateMs += lateMs;
+		g.fgPaceBusyMaxMs = max(g.fgPaceBusyMaxMs, busyMs);
+		g.fgPaceLateMaxMs = max(g.fgPaceLateMaxMs, lateMs);
+		if (++g.fgPaceSamples == 600) {
+			Log("FG manual Pace over 600 waits: avg busy-spin %.3f ms, max %.3f ms; avg deadline overshoot %.3f ms, max %.3f ms. Compare with CPU usage and PresentMon.",
+				g.fgPaceBusyMs / 600, g.fgPaceBusyMaxMs, g.fgPaceLateMs / 600, g.fgPaceLateMaxMs);
+			g.fgPaceSamples = 0;
+			g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		}
 	}
 
