@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "MipBias.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
 #include <cassert>
@@ -18,6 +19,10 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    assert(std::abs(RecommendedFsrMipBias(1.5f)+1.5849625f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(1.7f)+1.7655347f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(2.0f)+2.0f)<0.00001f);
+    assert(RecommendedFsrMipBias(1.0f)==0.0f);
     assert(TestFloatToHalf(1.0f)==0x3c00u);
     assert(TestFloatToHalf(-1.0f)==0xbc00u);
     assert(TestFloatToHalf(0.5f)==0x3800u);
