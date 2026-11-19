@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <deque>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -274,6 +275,18 @@ namespace
 		case DXGI_FORMAT_R32G32_TYPELESS: return DXGI_FORMAT_R32G32_FLOAT;
 		case DXGI_FORMAT_R16_TYPELESS: return DXGI_FORMAT_R16_FLOAT;
 		default: return f;
+		}
+	}
+
+	const char* FgBackbufferFormatName(DXGI_FORMAT f)
+	{
+		switch (Typed(f))
+		{
+		case DXGI_FORMAT_R8G8B8A8_UNORM: return "RGBA8";
+		case DXGI_FORMAT_B8G8R8A8_UNORM: return "BGRA8 (requires a format-conversion path)";
+		case DXGI_FORMAT_R10G10B10A2_UNORM: return "RGB10A2 (potential HDR10/PQ)";
+		case DXGI_FORMAT_R16G16B16A16_FLOAT: return "RGBA16F (potential scRGB HDR)";
+		default: return "unsupported/unknown";
 		}
 	}
 
@@ -1289,11 +1302,11 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		(bd.Width >= bd.Height) != (g.fgSceneW >= g.fgSceneH) ||
 		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM)
 	{
-		static bool warned = false;
-		if (!warned) {
-			warned = true;
-			Log("FG waiting for a compatible SDR backbuffer: camera %ux%u, swap chain %ux%u (format %u, samples %u).",
-				g.fgSceneW, g.fgSceneH, bd.Width, bd.Height, bd.Format, bd.SampleDesc.Count);
+		static std::set<DXGI_FORMAT> warned;
+		if (warned.insert(bd.Format).second) {
+			Log("FG waiting for a compatible RGBA8 backbuffer: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), samples %u.",
+				g.fgSceneW, g.fgSceneH, bd.Width, bd.Height, FgBackbufferFormatName(bd.Format),
+				bd.Format, bd.SampleDesc.Count);
 		}
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
