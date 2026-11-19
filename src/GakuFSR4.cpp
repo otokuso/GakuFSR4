@@ -25,6 +25,7 @@ std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
 bool frameGeneration=false;
 int motionVectorYSign=-1;
+int jitterXSign=-1,jitterYSign=-1;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -323,8 +324,8 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         capture.camera=Root(At<P>(cd,field.camera)); capture.motion=Root(motion);
         capture.frame=frame;
         capture.id=id;
-        capture.jitterX=frame_math::Jitter(matrix[12],w);
-        capture.jitterY=frame_math::Jitter(matrix[13],h);
+        capture.jitterX=frame_math::Jitter(matrix[12],w,jitterXSign);
+        capture.jitterY=frame_math::Jitter(matrix[13],h,jitterYSign);
         if(offscreen && ratio==1.0f) {
             if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
                 originalTaa(cmd,material,cd,src,dst,motion,mi);
@@ -599,6 +600,14 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         return GAKU_E_INVALID_ARGUMENT;
     }
     if(motionVectorYSign==1) Log("Experimental positive Y motion-vector scale enabled; compare against the default -1 sign",GAKU_LOG_WARNING);
+    jitterXSign=GetPrivateProfileIntW(L"FSR4",L"JitterXSign",-1,config.c_str());
+    jitterYSign=GetPrivateProfileIntW(L"FSR4",L"JitterYSign",-1,config.c_str());
+    if((jitterXSign!=1&&jitterXSign!=-1)||(jitterYSign!=1&&jitterYSign!=-1)) {
+        Log("JitterXSign/JitterYSign must be +1 or -1",GAKU_LOG_ERROR);
+        return GAKU_E_INVALID_ARGUMENT;
+    }
+    if(jitterXSign!= -1||jitterYSign!=-1)
+        Log("Experimental FSR jitter sign override enabled; compare against default -1/-1",GAKU_LOG_WARNING);
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];
