@@ -68,6 +68,8 @@ int main() {
     assert(TestFloatToHalf(-1.0f)==0xbc00u);
     assert(TestFloatToHalf(0.5f)==0x3800u);
     assert(TestFloatToHalf(0.0f)==0);
+    assert(frame_math::MotionVectorYScale(720,-1)==-720.0f);
+    assert(frame_math::MotionVectorYScale(720,1)==720.0f);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);

@@ -31,6 +31,8 @@ AMDのDLLは[公式FSR SDK v2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/F
 
 `Preset` が未指定なら、旧版の `Ratio` 設定が使われます。プリセット名が認識できない場合はQualityになります。`Enabled=0` で無効化できます。設定はゲーム再起動時に読み込まれます。ゲーム内での確認には `GakuLoader/Logs/gakuloader.log` の `FSR context` と `FSR active` を参照してください。
 
+モーションベクトルの上下方向の検証用に `MotionVectorYSign=-1`（既定）または `MotionVectorYSign=1` を設定できます。Unity/URPの実際の符号が未検証のため、既定の符号は変更していません。上下移動する被写体を同じ条件で比較し、残像や輪郭の揺れを確認してください。
+
 対象は対応GPUを使うDirect3D 11のゲームカメラです。FSR 4の処理には別のDirect3D 12デバイスを使用するので、性能は環境によって変わります。画質の比較や他の構成での長時間テストは未実施です。
 
 フレーム生成は既定で無効です。`FrameGeneration=1` で有効になり、ゲームログの `FSR Frame Generation active` に実際に使ったバージョンが出ます。4.0.2にはWindows 11とRadeon RX 9000シリーズ以降が必要です。縦画面と横画面のSDR表示で、補間フレームを挟める表示間隔があるときに動作します。中央に表示される映像に黒帯が付く場合は、映像部分を補間して黒帯やその上のUIを実フレームから残します。映像部分のUIも補間の対象になります。ウィンドウが小さいときは、カメラの描画解像度を下限に補間の処理解像度を抑えます。

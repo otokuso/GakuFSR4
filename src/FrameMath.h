@@ -39,6 +39,9 @@ inline bool RotationJump(const float* forward, const float* previousForward) {
     // More than 45 degrees between two consecutive frames is a likely camera cut.
     return !(dot / std::sqrt(a * b) >= 0.70710678f);
 }
+inline float MotionVectorYScale(int renderHeight, int sign) {
+    return static_cast<float>(renderHeight) * sign;
+}
 inline bool Reset(int camera, int oldCamera, int frame, int oldFrame,
                   float fov, float oldFov, const float* pos, const float* oldPos) {
     float distance = 0;
