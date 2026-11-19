@@ -599,10 +599,12 @@ namespace
 		D3D11_TEXTURE2D_DESC sd;
 		src->GetDesc(&sd);
 		DXGI_FORMAT fmt = Typed(sd.Format);
-		if (s.t11 && s.w == sd.Width && s.h == sd.Height && s.fmt == fmt) return true;
+		// A cache hit on dimensions/format does not make CopyResource legal if
+		// the application's texture changed its sample or subresource layout.
 		if (sd.SampleDesc.Count != 1) { Log("%s: multisampled textures are not supported.", name); return false; }
 		if (sd.MipLevels != 1 || sd.ArraySize != 1) { Log("%s: %u mips, %u slices: CopyResource needs exactly one of each.", name, sd.MipLevels, sd.ArraySize); return false; }
 		if (Typeless(fmt)) { Log("%s: no typed format for game texture format %d.", name, (int)sd.Format); return false; }
+		if (s.t11 && s.w == sd.Width && s.h == sd.Height && s.fmt == fmt) return true;
 		return MakeShared(s, sd.Width, sd.Height, fmt, uav, name, view, (int)sd.Format);
 	}
 
@@ -1635,8 +1637,9 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 		g.fgHavePrevious = false;
 	}
 	g.fgPending = false;
-	if (!WaitOut(nativePresent.fence, FrameWaitMs, "native swap-chain command reuse") ||
-		!EnsureShared(g.present, source, false, "native SwapChain colour", false)) return DXGI_ERROR_DEVICE_REMOVED;
+	if (!WaitOut(nativePresent.fence, FrameWaitMs, "native swap-chain command reuse")) return DXGI_ERROR_DEVICE_REMOVED;
+	// An unsupported texture layout or allocation failure is not a removed GPU.
+	if (!EnsureShared(g.present, source, false, "native SwapChain colour", false)) return E_FAIL;
 	auto* allocator = nativePresent.allocator.Get();
 	auto* list = nativePresent.list.Get();
 	HRESULT hr = allocator->Reset();
@@ -1812,6 +1815,17 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&extended)))) alternate = extended.Get();
 		if (alternate == sc && SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&base)))) alternate = base.Get();
 		g_fgDropNotice.SetTarget(sc, alternate);
+		// Prepare ran before Present, so it could not know that the target
+		// changed. Skip this frame and reset both FG history and frame pacing.
+		g.fgHavePrevious = false;
+		g.fgPendingReset = true;
+		g.fgContent = {};
+		g.fgLastEntry = 0;
+		g.fgIntervalTicks = 0;
+		g.fgRefreshFrames = 0;
+		g.stats.fgSkipped++;
+		g_fgSkipReason = "Game swap chain changed";
+		return false;
 	}
 	const ImageRect previous = g.fgContent;
 	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;

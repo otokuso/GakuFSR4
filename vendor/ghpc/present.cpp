@@ -314,10 +314,10 @@ void InstallPresentHook(ID3D11Resource* anchor)
 }
 
 bool IsPresentWindow(HWND window) {
-	if (!g_capture) return true;
 	if (HWND known = g_window.load()) return known == window;
-	wchar_t name[64]{};
-	if (!GetClassNameW(window, name, _countof(name)) || wcscmp(name, L"UnityWndClass") != 0) return false;
+	// The factory hook can fail even when the fallback Present vtable hook works.
+	// Never treat that as permission to interpolate an unrelated swap chain.
+	if (!UnityWindow(window)) return false;
 	g_window = window;
 	return true;
 }

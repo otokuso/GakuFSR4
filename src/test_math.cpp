@@ -298,6 +298,14 @@ int main() {
     }
     dropNotice.Mark(&gameChain1);
     assert(dropNotice.Consume());
+    dropNotice.SetTarget(&otherChain);
+    assert(!dropNotice.IsTarget(&gameChain));
+    assert(!dropNotice.IsTarget(&gameChain1));
+    assert(dropNotice.IsTarget(&otherChain));
+    dropNotice.Mark(&gameChain1);
+    assert(!dropNotice.Consume());
+    dropNotice.Mark(&otherChain);
+    assert(dropNotice.Consume());
     dropNotice.SetTarget(nullptr);
     dropNotice.Mark(&gameChain);
     assert(!dropNotice.Consume());
