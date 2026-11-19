@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "PresentHookSlots.h"
 #include "Preset.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -17,6 +18,15 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    void* first[23]{}; void* second[23]{};
+    PresentHookSlots hooked;
+    int original1=1, original2=2;
+    assert(hooked.Remember(&first[8], &original1));
+    assert(!hooked.Remember(&first[8], &original2));
+    assert(hooked.Remember(&second[8], &original2));
+    assert(hooked.Find(&first[8]) == &original1);
+    assert(hooked.Find(&second[8]) == &original2);
+    assert(hooked.Find(&second[22]) == nullptr);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
