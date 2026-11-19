@@ -20,6 +20,7 @@
 #include "dx12/ffx_api_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
+#include "../../src/FgDropNotice.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -263,6 +264,16 @@ namespace
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
 	std::mutex g_renderLock;
+	FgDropNotice g_fgDropNotice;
+
+	void InvalidateSkippedFgPresent()
+	{
+		if (!g_fgDropNotice.Consume()) return;
+		g.fgPending = g.fgHavePrevious = false;
+		g.fgPendingReset = true;
+		g.stats.fgSkipped++;
+		Log("FG skipped a Present due to render-lock contention; discarded pending input and reset history.");
+	}
 
 	std::mutex g_statsLock;
 	Stats g_published = {};
@@ -1227,6 +1238,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	void __stdcall OnRenderEvent(int eventId, void* data)
 	{
 		std::lock_guard<std::mutex> lock(g_renderLock);
+		InvalidateSkippedFgPresent();
 		g.renderThread = GetCurrentThreadId();
 		RunRenderEvent(eventId, data);
 	}
@@ -1270,7 +1282,12 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	const DXGI_PRESENT_PARAMETERS* parameters, HRESULT* hr)
 {
 	std::unique_lock<std::mutex> lock(g_renderLock, std::try_to_lock);
-	if (!lock || !g.fg || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
+	if (!lock) {
+		if (!(flags & DXGI_PRESENT_TEST)) g_fgDropNotice.Mark();
+		return false;
+	}
+	InvalidateSkippedFgPresent();
+	if (!g.fg || g.fgUnavailable || g.failed || deviceLost || (flags & DXGI_PRESENT_TEST)) return false;
 	ComPtr<ID3D11Device> device;
 	if (FAILED(sc->GetDevice(IID_PPV_ARGS(&device))) || device.Get() != g.d11Base) return false;
 	DXGI_SWAP_CHAIN_DESC chain{};
