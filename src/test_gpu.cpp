@@ -125,9 +125,9 @@ int wmain(int argc,wchar_t** argv) {
                 fd.jitterX=i%2?0.25f:-0.25f;
                 fd.jitterY=(i%3-1)*0.25f;
                 fd.fovV=i<3?1.0f:1.2f;
-                fd.camPos[0]=i<3?0:100;
-                fd.camFwd[0]=i<3?0:1;
-                fd.camFwd[2]=i<3?1:0;
+                fd.pos[0]=i<3?0:100;
+                fd.fwd[0]=i<3?0:1;
+                fd.fwd[2]=i<3?1:0;
                 fd.exposure=i<3?1.0f:1.3f;
                 printf("Dynamic frame %d: moving square (%d,%d), jitter (%.2f,%.2f), camera cut=%d, exposure=%.2f\n",
                     i,objectX,objectY,fd.jitterX,fd.jitterY,fd.reset,fd.exposure);
