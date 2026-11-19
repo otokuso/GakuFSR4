@@ -33,6 +33,7 @@
 #include "../../src/NativeSwapchain.h"
 #include "../../src/PresentRate.h"
 #include "../../src/LiveTiming.h"
+#include "../../src/DafpDiagnostics.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -230,6 +231,11 @@ namespace
 	State& g = *new State;
 	std::mutex g_renderLock;
 	std::atomic<bool> g_nativeSwapchainActive{false};
+	std::atomic<HWND> g_dafpWindow{nullptr};
+	std::atomic<uint32_t> g_dafpSwapchainMajor{0};
+	std::atomic<uint32_t> g_dafpSyncInterval{0};
+	std::atomic<uint64_t> g_dafpLastPresentTick{0};
+	std::atomic<uint64_t> g_dafpLastGeneratedTick{0};
 	struct NativePresentState {
 		IDXGISwapChain4* chain = nullptr;
 		ffxContext swapchainContext = nullptr;
@@ -1369,11 +1375,16 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 	nativePresent.generated = 0;
 	nativePresent.error = FFX_API_RETURN_OK;
 	nativePresent.enabled = false;
+	g_dafpWindow.store(window);
+	g_dafpSwapchainMajor.store(0);
+	g_dafpLastPresentTick.store(0);
+	g_dafpLastGeneratedTick.store(0);
 	g_nativeSwapchainActive = true;
 	multithread->SetMultithreadProtected(TRUE);
 	ffxQueryGetProviderVersion provider = {};
 	provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
 	g.fx.Query(&state.context, &provider.header);
+	g_dafpSwapchainMajor.store(DafpSwapchainMajor(provider.versionName));
 	Log("Unity AMD native SwapChain active: %ux%u, provider %s, flags 0x%x.",
 		desc.Width, desc.Height, provider.versionName ? provider.versionName : "unknown", desc.Flags);
 	return S_OK;
@@ -1388,6 +1399,10 @@ void DestroyNativeSwapchain(NativeSwapchainState& state)
 		DestroyFg();
 		nativePresent.chain = nullptr;
 		g_nativeSwapchainActive = false;
+		g_dafpWindow.store(nullptr);
+		g_dafpSwapchainMajor.store(0);
+		g_dafpLastPresentTick.store(0);
+		g_dafpLastGeneratedTick.store(0);
 		nativePresent.swapchainContext = nullptr;
 		nativePresent.list.Reset();
 		nativePresent.allocator.Reset();
@@ -1501,11 +1516,14 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	g.fgHavePrevious = SUCCEEDED(hr) && failure == FFX_API_RETURN_OK && nativePresent.enabled;
 	if (SUCCEEDED(hr)) {
 		if (hr == S_OK) {
+			g_dafpSyncInterval.store(sync);
+			g_dafpLastPresentTick.store(GetTickCount64());
 			CountPresentFrames(1, frames);
 			RecordGamePresentQpc(static_cast<uint64_t>(appEntry.QuadPart));
 			if (nativePresent.enabled) ObserveFgInterval(entry.QuadPart, frequency.QuadPart);
 		}
 		if (frames) {
+			if (failure == FFX_API_RETURN_OK) g_dafpLastGeneratedTick.store(GetTickCount64());
 			if (g.stats.fgGenerated == 0) Log("First AMD SwapChain interpolation: SyncInterval=%u, flags=0x%x.", sync, flags);
 			g.stats.fgGenerated += frames;
 			g.stats.fgReal++;
@@ -1602,6 +1620,24 @@ EXPORT int FSR4_PollLog(char* buf, int cap)
 
 EXPORT const char* FSR4_GetLastFgSkipReason() { return g_fgSkipReason.load(); }
 extern "C" bool FSR4_UsesNativeSwapchain() { return g_nativeSwapchainActive.load(); }
+
+EXPORT void FSR4_GetDafpDiagnostics(DafpDiagnostics* out)
+{
+	if (!out) return;
+	DafpDiagnostics snapshot{};
+	snapshot.nativeSwapchain = g_nativeSwapchainActive.load();
+	if (snapshot.nativeSwapchain) {
+		snapshot.window = g_dafpWindow.load();
+		snapshot.swapchainMajor = g_dafpSwapchainMajor.load();
+		snapshot.syncInterval = g_dafpSyncInterval.load();
+		const uint64_t now = GetTickCount64();
+		const uint64_t present = g_dafpLastPresentTick.load();
+		const uint64_t generated = g_dafpLastGeneratedTick.load();
+		snapshot.presentRecent = present && now >= present && now - present < 2500;
+		snapshot.generatedRecent = generated && now >= generated && now - generated < 2500;
+	}
+	*out = snapshot;
+}
 
 EXPORT void FSR4_GetStats(Stats* out)
 {

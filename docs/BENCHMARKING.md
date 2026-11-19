@@ -4,6 +4,8 @@
 
 Open F1 → `GakuFSR4` → **Live frame pacing / input timing**. The panel updates about every two seconds and reports samples from the most recent ten seconds:
 
+The separate **Runtime diagnostics → DAFP status (diagnostic)** panel shows recent native FG activity, AMD SwapChain provider major version, the application's last successful Present `SyncInterval`, and whether the game client covers its monitor. Its `possible (NOT confirmed active)` result means only that these observable prerequisites hold. The AMD SDK does not expose the driver's actual DAFP selection, Adrenalin compatibility or live VRR range; these cannot be verified by the panel, and frame delivery must still be compared with an external display-time measurement.
+
 | UI field | What is actually measured |
 | --- | --- |
 | `Game Present gap` median/p95/p99 | The time between **successful real-game Present call entries** (FG off or with the AMD Native SwapChain). It excludes generated-frame display events. |

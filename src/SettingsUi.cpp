@@ -8,11 +8,13 @@
 #include "BridgeStats.h"
 #include "PresentRate.h"
 #include "LiveTiming.h"
+#include "DafpDiagnostics.h"
 #include "SettingsUi.h"
 
 extern "C" void FSR4_GetStats(Stats* out);
 extern "C" const char* FSR4_GetLastFgSkipReason();
 extern "C" bool FSR4_UsesNativeSwapchain();
+extern "C" void FSR4_GetDafpDiagnostics(DafpDiagnostics* out);
 
 namespace gakufsr {
 namespace {
@@ -25,9 +27,31 @@ int draftSharpness=20;
 int draftJitterPhaseMode=DefaultJitterPhaseMode;
 const char* saveMessage=nullptr;
 Stats currentStats{};
+DafpDiagnostics currentDafp{};
 ULONGLONG lastStatsRead=0;
 ULONGLONG lastTimingRead=0;
 LiveTimingSummary currentTiming{};
+
+// AMD requires borderless fullscreen covering one display, or exclusive
+// fullscreen. Client geometry avoids mistaking a large decorated window for FG
+// fullscreen. Geometry alone cannot establish actual VRR/display-driver state.
+int MonitorCoverage(void* window) {
+    const HWND hwnd = static_cast<HWND>(window);
+    if (!hwnd || !IsWindow(hwnd)) return -1;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return 0;
+    RECT client{};
+    if (!GetClientRect(hwnd, &client)) return -1;
+    POINT topLeft{client.left, client.top};
+    POINT bottomRight{client.right, client.bottom};
+    if (!ClientToScreen(hwnd, &topLeft) || !ClientToScreen(hwnd, &bottomRight)) return -1;
+    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+    MONITORINFO info{sizeof(info)};
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) return -1;
+    constexpr LONG tolerance = 2;
+    const auto& display = info.rcMonitor;
+    return topLeft.x <= display.left + tolerance && topLeft.y <= display.top + tolerance &&
+        bottomRight.x >= display.right - tolerance && bottomRight.y >= display.bottom - tolerance ? 1 : 0;
+}
 
 bool Save() {
     wchar_t sharpness[16]{};
@@ -135,6 +159,7 @@ void DrawSettings(void*) {
         ULONGLONG now=GetTickCount64();
         if (!lastStatsRead || now-lastStatsRead>=2000) {
             FSR4_GetStats(&currentStats);
+            FSR4_GetDafpDiagnostics(&currentDafp);
             lastFgSkip=FSR4_GetLastFgSkipReason();
             lastStatsRead=now;
         }
@@ -159,6 +184,32 @@ void DrawSettings(void*) {
             else ImGui::TextUnformatted("FG source interval: --");
             if(FSR4_UsesNativeSwapchain()) ImGui::TextUnformatted("FG pacing: AMD SwapChain");
             ImGui::Text("FG last dispatch result: %d",s.fgLastResult);
+        }
+        if(ImGui::CollapsingHeader("DAFP status (diagnostic)",ImGuiTreeNodeFlags_DefaultOpen)) {
+            const int coverage=MonitorCoverage(currentDafp.window);
+            switch(EvaluateDafpEligibility(currentDafp,coverage)) {
+            case DafpEligibility::Inactive:
+                ImGui::TextUnformatted("DAFP: inactive (no recent native FG frames)"); break;
+            case DafpEligibility::Blocked:
+                ImGui::TextUnformatted("DAFP: prerequisites not met"); break;
+            case DafpEligibility::Unknown:
+                ImGui::TextUnformatted("DAFP: unknown (incomplete runtime data)"); break;
+            case DafpEligibility::PossibleUnverified:
+                ImGui::TextUnformatted("DAFP: possible (NOT confirmed active)"); break;
+            }
+            ImGui::Text("AMD native SwapChain: %s",currentDafp.nativeSwapchain?"yes":"no");
+            if(currentDafp.swapchainMajor)
+                ImGui::Text("SwapChain version: %u.x (%s)",currentDafp.swapchainMajor,
+                    currentDafp.swapchainMajor>=4?"4.0.0+ required: yes":"4.0.0+ required: no");
+            else ImGui::TextUnformatted("SwapChain version: -- (unknown)");
+            ImGui::Text("Recent generated FG frames: %s",currentDafp.generatedRecent?"yes":"no");
+            if(currentDafp.presentRecent)
+                ImGui::Text("VSync disabled (SyncInterval=0): %s",currentDafp.syncInterval==0?"yes":"no");
+            else ImGui::TextUnformatted("VSync disabled: -- (no recent Present)");
+            ImGui::Text("Fullscreen monitor coverage: %s",coverage<0?"unknown":coverage?"yes":"no");
+            ImGui::TextWrapped("Driver >= Adrenalin 26.10.1 and VRR window: not verified. "
+                "AMD does not expose which pacing mode the driver selected. "
+                "'Possible' only means the observable prerequisites are met.");
         }
         if(lastFgSkip) ImGui::TextWrapped("Last FG skip: %s",lastFgSkip);
         ImGui::TextDisabled("Snapshot refreshes every 2 seconds; some GPU timing values are rolling averages.");

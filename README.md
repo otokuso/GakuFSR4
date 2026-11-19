@@ -165,10 +165,22 @@ GakuLoaderのGakuFSR4パネルに、以下の診断情報が表示されます�
 | `Pacing jitter (stddev)` | 上記間隔の標準偏差。小さいほど間隔が揃っています |
 | `Input event -> Present start` | 取得できたキーボード・マウスイベントから次の実ゲームPresent開始までの時間（中央値 / p95、ms） |
 | `Runtime diagnostics` | FSR/FGプロバイダー、GPU処理時間、推定VRAM使用量、生成・スキップ数、直近のFGスキップ理由など |
+| `DAFP status (diagnostic)` | AMD Native SwapChainのバージョン、直近のFG生成、VSync（PresentのSyncInterval）、全画面の表示領域を確認。`possible` はDAFP有効の証明ではありません |
 
 タイミングの集計対象は**直近10秒間の実ゲームフレーム**で、画面内の集計値は約2秒ごとに更新されます。`n` は集計サンプル数です。入力イベントを取得できない環境では `--` になります。
 
 ここでの入力値は、Windowsメッセージとして取得できた入力から**CPU側のPresent開始まで**の参考値です。入力デバイスから実際の画素が発光するまでの全遅延は表しません。FGで生成したフレームの画面表示間隔も、F1画面だけでは測れません。
+
+### DAFP（Driver-Assisted Frame Pacing）の状態
+
+F1 → `GakuFSR4` → `Runtime diagnostics` → `DAFP status (diagnostic)` で、動作中の条件を確認できます。
+
+- `inactive`：Native SwapChainが利用されていないか、直近約2.5秒にFG生成フレーム／実Presentがありません。
+- `prerequisites not met`：確認可能な条件（SwapChain 4.0.0以上、VSyncオフ、画面全体を覆うゲームウィンドウ）のいずれかを満たしません。
+- `unknown`：SwapChainのバージョンやウィンドウ位置を取得できません。
+- `possible (NOT confirmed active)`：確認可能な条件は満たしています。ただし、**DAFPが実際に選択されたという意味ではありません**。
+
+AMD公開APIには現在のDAFP選択状態を返す機能がなく、ドライバーの対応状況とVRRが有効なリフレッシュレート範囲内かどうかはこのパネルから判定できません。AMDが案内する条件は、RX 9000シリーズ以降、Adrenalin 26.10.1以降、SwapChain 4.0.0以降、VSyncオフ、VRR範囲内のフルスクリーン表示です。表示モードの変化に伴ってDAFPがオン／オフに切り替わることもあります。詳しくは [AMD公式仕様](https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-swap-chain/#frame-pacing-and-presentation) を参照してください。
 
 ### 画面に表示されたフレームを測る（PresentMon）
 
