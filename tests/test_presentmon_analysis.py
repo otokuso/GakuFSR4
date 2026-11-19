@@ -2,7 +2,7 @@ import csv
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from scripts.analyze_presentmon import analyze, main
@@ -98,6 +98,15 @@ class PresentMonAnalysisTests(unittest.TestCase):
         self.write([self.row("16.7")])
         with self.assertRaisesRegex(ValueError, "leaves no displayed frames"):
             analyze(self.path, warmup=1)
+
+    def test_trace_output_cannot_overwrite_capture(self):
+        self.write([self.row("8")])
+        original = self.path.read_bytes()
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                main([str(self.path), "--warmup", "0", "--trace-out", str(self.path)])
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_cli_emits_summary_and_per_frame_trace(self):
         self.write([self.row("10", input_ms="20", click="25"),

@@ -94,11 +94,9 @@ public:
             if (gapMs <= 1000.0) presents_.Add(gapMs, at);
         }
         lastPresent_ = at;
-        if (pendingInput_) {
-            if (at >= pendingInput_) {
-                const double ageMs = 1000.0 * static_cast<double>(at - pendingInput_) / frequency;
-                if (ageMs <= 1000.0) inputs_.Add(ageMs, at);
-            }
+        if (pendingInput_ && at >= pendingInput_) {
+            const double ageMs = 1000.0 * static_cast<double>(at - pendingInput_) / frequency;
+            if (ageMs <= 1000.0) inputs_.Add(ageMs, at);
             pendingInput_ = 0;
         }
     }

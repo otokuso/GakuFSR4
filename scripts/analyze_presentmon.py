@@ -124,7 +124,7 @@ def analyze(path, warmup=0, latency_frames="application", slow_factor=1.5):
 def write_trace(path, entries):
     columns = ["display_index", "source_row", "frame_type", DISPLAY_COLUMN,
                "MsBetweenPresents", *LATENCIES.values()]
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    with path.open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         for display_index, (source_row, row) in enumerate(entries):
@@ -142,7 +142,8 @@ def main(argv=None):
     parser.add_argument("--slow-factor", type=float, default=1.5,
                         help="count display intervals longer than this times the median (default: 1.5)")
     parser.add_argument("--require-input", action="store_true", help="error if no recorded keyboard/mouse input samples")
-    parser.add_argument("--trace-out", type=Path, help="export per-display-frame intervals and input metrics (one capture only)")
+    parser.add_argument("--trace-out", type=Path,
+                        help="export per-display-frame intervals and input metrics to a new file (one capture only)")
     args = parser.parse_args(argv)
     if args.warmup < 0 or not math.isfinite(args.slow_factor) or args.slow_factor <= 1:
         parser.error("--warmup must be nonnegative and --slow-factor must be finite and above 1")

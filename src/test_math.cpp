@@ -69,6 +69,16 @@ int main() {
         assert(timing.Snapshot(1030000,hz).present.samples==0);
     }
     {
+        LiveTimingTracker timing;
+        constexpr uint64_t hz = 1000;
+        timing.ObserveInput(130);
+        timing.ObservePresent(120, hz); // This Present entered before the input arrived.
+        assert(timing.Snapshot(130, hz).input.samples == 0);
+        timing.ObservePresent(150, hz);
+        const auto input = timing.Snapshot(150, hz).input;
+        assert(input.samples == 1 && input.medianMs == 20);
+    }
+    {
         TimingSampleWindow<3> window;
         for(uint64_t i=1;i<=4;++i) window.Add(static_cast<double>(i),i*1000);
         const auto samples=window.Snapshot(4000,1000);
