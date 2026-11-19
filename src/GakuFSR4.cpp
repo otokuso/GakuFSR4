@@ -27,6 +27,7 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
 bool frameGeneration=false;
+bool fsrJitterCycle=false;
 int motionVectorYSign=-1;
 int jitterXSign=-1,jitterYSign=-1;
 float ratio=1.5f, sharpness=0.2f;
@@ -352,7 +353,8 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         At<int>(desc,field.descHeight)=h;
         auto taa=static_cast<char*>(cd)+field.taaSettings;
         const auto jitter=RepairTaaJitter(oldJitterX,oldJitterY,oldW,oldH,w,h,frame,
-            At<int>(taa,field.taaOffset),At<float>(taa,field.taaJitter));
+            At<int>(taa,field.taaOffset),At<float>(taa,field.taaJitter),
+            fsrJitterCycle?FsrRecommendedJitterPhases(ratio):1024);
         matrix[12]=jitter.x;matrix[13]=jitter.y;
         static bool reported=false;
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
@@ -713,6 +715,10 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     }
     if(jitterXSign!= -1||jitterYSign!=-1)
         Log("Experimental FSR jitter sign override enabled; compare against default -1/-1",GAKU_LOG_WARNING);
+    const auto cycleMode=GetPrivateProfileIntW(L"FSR4",L"JitterPhaseMode",0,config.c_str());
+    fsrJitterCycle=cycleMode==1;
+    if(cycleMode>1) Log("Invalid JitterPhaseMode; using the normal Unity jitter cycle",GAKU_LOG_WARNING);
+    if(fsrJitterCycle) Log("Experimental FSR jitter phase cycle enabled",GAKU_LOG_WARNING);
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];

@@ -164,6 +164,13 @@ int main() {
     assert(camera.Allow(33,2));
     camera.Reset();
     assert(camera.Allow(11,14));
+    assert(FsrRecommendedJitterPhases(1.5f)==18);
+    assert(FsrRecommendedJitterPhases(1.7f)==23);
+    assert(FsrRecommendedJitterPhases(2.0f)==32);
+    assert(FsrRecommendedJitterPhases(3.0f)==72);
+    auto phaseA=RepairTaaJitter(1,1,1920,1080,1280,720,0,-1,1,18);
+    auto phaseB=RepairTaaJitter(0,0,1920,1080,1280,720,18,-1,1,18);
+    assert(phaseA.x==phaseB.x && phaseA.y==phaseB.y);
     auto generated=RepairTaaJitter(0,0,1920,1080,1280,720,1,0,1.0f);
     assert(std::isfinite(generated.x) && std::isfinite(generated.y));
     assert(std::fabs(generated.x)+std::fabs(generated.y)>0);
