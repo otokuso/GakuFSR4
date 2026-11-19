@@ -131,7 +131,7 @@ namespace
 	}
 
 	std::mutex g_viewLock;
-	uint64_t g_viewGen = 0;
+	uint64_t g_viewGen = 0, g_hudlessGen = 0;
 	struct Retired { ComPtr<ID3D11Texture2D> t11; ComPtr<ID3D12Resource> t12; ComPtr<ID3D11ShaderResourceView> srv; uint64_t gen; uint64_t unusedSince; };
 	std::vector<Retired> g_retired;
 	uint64_t g_viewTicks = 0;
@@ -1180,6 +1180,10 @@ void main(uint3 id : SV_DispatchThreadID)
 
 	void Upscale(const FrameData& handed)
 	{
+		if (g_hudlessGen) {
+			std::lock_guard<std::mutex> viewLock(g_viewLock);
+			g_hudlessGen = 0;
+		}
 		if (!g.loaded || g.failed || !handed.color || !handed.depth || !handed.motion || !handed.output) return;
 		FrameData fd = handed;
 		float exposure = HasExternalExposure(g.exposureRequired, handed.exposure) ? handed.exposure : 0.0f;
@@ -1296,6 +1300,11 @@ void main(uint3 id : SV_DispatchThreadID)
 			return;
 		}
 		if (!(fd.direct & DirectOutput)) g.ctx->CopyResource((ID3D11Resource*)fd.output, g.output.t11.Get());
+		if (fd.fg && fd.hudless == fd.output && g.output.srv) {
+			std::lock_guard<std::mutex> viewLock(g_viewLock);
+			g_hudlessGen = g_viewGen;
+			g.stats.fgHudless++;
+		}
 		g.stats.frames++;
 	}
 
@@ -1747,9 +1756,10 @@ EXPORT uint64_t FSR4_GetViews(void** color, void** motion, void** output)
 
 EXPORT uint64_t FSR4_GetHudlessView(void** hudless)
 {
+	if (!hudless) return 0;
 	std::lock_guard<std::mutex> l(g_viewLock);
-	*hudless = nullptr;
-	return 0;
+	*hudless = g_hudlessGen && g_hudlessGen == g_viewGen ? g.output.srv.Get() : nullptr;
+	return *hudless ? g_viewGen : 0;
 }
 
 EXPORT void FSR4_ViewsInUse(uint64_t gen)

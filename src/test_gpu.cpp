@@ -41,7 +41,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool fgCross=fgOffset||(argc==4&&wcscmp(argv[3],L"--fg-cross")==0);
     const bool fgResized=fgScaled||fgLetterbox||fgCross;
     const bool fgDistortion=argc==4&&wcscmp(argv[3],L"--fg-distortion")==0;
-    const bool fg=fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
+    const bool fgHudless=argc==4&&wcscmp(argv[3],L"--fg-hudless")==0;
+    const bool fg=fgHudless||fgDistortion||fgResized||(argc==4&&wcscmp(argv[3],L"--fg")==0);
     const bool portrait=nativeAA||quality||fgCross||(argc==4&&wcscmp(argv[3],L"--portrait")==0);
     if(argc==4&&!portrait&&!fg&&!dynamic) return 2;
     auto dll=LoadLibraryW(argv[1]);if(!dll) return 3;
@@ -64,6 +65,8 @@ int wmain(int argc,wchar_t** argv) {
             GetProcAddress(dll,"FSR4_SetFgRadialDistortion"));
         if(!setDistortion || !setDistortion(0.1f,0,0.5f,0.5f)) return 4;
     }
+    auto hudlessView=reinterpret_cast<uint64_t(*)(void**)>(GetProcAddress(dll,"FSR4_GetHudlessView"));
+    if(fgHudless && (!hudlessView || hudlessView(nullptr)!=0)) return 4;
     puts("GPU test: AMD runtime loaded");
     try {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> ctx;
@@ -147,7 +150,14 @@ int wmain(int argc,wchar_t** argv) {
                     i,objectX,objectY,fd.jitterX,fd.jitterY,fd.reset,fd.exposure);
             }
             printf("GPU test: dispatch %d\n",i);
+            if(fgHudless) fd.hudless=i%2==0 ? fd.output : nullptr;
             render(1,&fd);
+            if(fgHudless) {
+                void* view=nullptr;
+                const auto generation=hudlessView(&view);
+                const bool expected=i%2==0;
+                if((generation!=0)!=expected || (view!=nullptr)!=expected) return 10;
+            }
             if(!fg) continue;
             ComPtr<ID3D11Texture2D> backbuffer;
             ComPtr<ID3D11RenderTargetView> target;
@@ -207,6 +217,10 @@ int wmain(int argc,wchar_t** argv) {
         printf("output half-float samples: left=0x%04X right=0x%04X\n",left,right);
         if(left==0||right<=left||right>=0x7c00) return 6;
         render(2,nullptr);
+        if(fgHudless) {
+            void* view=nullptr;
+            if(hudlessView(&view) || view) return 10;
+        }
         puts(fg?"PASS: FSR FG 4.0.2 GPU dispatch and generated frames through Present and Present1."
                :dynamic?"PASS: moving scene, nonzero jitter, camera-cut reset and exposure-change FSR dispatch; inspect frame quality separately."
                :"PASS: actual FSR 4 GPU dispatch and output readback; the game was not started.");
