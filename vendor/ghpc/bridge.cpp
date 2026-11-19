@@ -303,8 +303,8 @@ namespace
 	{
 		switch (Typed(f))
 		{
-		case DXGI_FORMAT_R8G8B8A8_UNORM: return "RGBA8 SDR";
-		case DXGI_FORMAT_B8G8R8A8_UNORM: return "BGRA8 SDR (requires a format-conversion path)";
+		case DXGI_FORMAT_R8G8B8A8_UNORM: return "RGBA8";
+		case DXGI_FORMAT_B8G8R8A8_UNORM: return "BGRA8 (requires a format-conversion path)";
 		case DXGI_FORMAT_R10G10B10A2_UNORM: return "RGB10A2 (potential HDR10/PQ)";
 		case DXGI_FORMAT_R16G16B16A16_FLOAT: return "RGBA16F (potential scRGB HDR)";
 		default: return "unsupported/unknown";
@@ -1298,20 +1298,15 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	ComPtr<ID3D11Texture2D> bb;
 	D3D11_TEXTURE2D_DESC bd{};
 	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) bb->GetDesc(&bd);
-	DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-	ComPtr<IDXGISwapChain3> sc3;
-	if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3)))) colorSpace = sc3->GetColorSpace1();
 	if (!bd.Width || !bd.Height || !g.fgSceneW || !g.fgSceneH ||
 		(bd.Width >= bd.Height) != (g.fgSceneW >= g.fgSceneH) ||
-		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM ||
-		colorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709)
+		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM)
 	{
-		static std::set<uint64_t> warned;
-		const uint64_t signature = (static_cast<uint64_t>(bd.Format) << 32) | static_cast<uint32_t>(colorSpace);
-		if (warned.insert(signature).second) {
-			Log("FG waiting for compatible SDR RGBA8: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), color space %u, samples %u.",
+		static std::set<DXGI_FORMAT> warned;
+		if (warned.insert(bd.Format).second) {
+			Log("FG waiting for a compatible RGBA8 backbuffer: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), samples %u.",
 				g.fgSceneW, g.fgSceneH, bd.Width, bd.Height, FgBackbufferFormatName(bd.Format),
-				bd.Format, colorSpace, bd.SampleDesc.Count);
+				bd.Format, bd.SampleDesc.Count);
 		}
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
