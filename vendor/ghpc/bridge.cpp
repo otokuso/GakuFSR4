@@ -259,6 +259,7 @@ namespace
 		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
 		bool fgOffLogged = true;
+		std::atomic<bool> hudlessCaptured{ false };
 	};
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
@@ -1140,12 +1141,14 @@ void main(uint3 id : SV_DispatchThreadID)
 		g.stats.lastResult = (int32_t)rc;
 		if (rc == FFX_API_RETURN_OK)
 		{
+			g.hudlessCaptured = fd.fg && fd.hudless == fd.output && g.output.srv;
+			if (g.hudlessCaptured) g.stats.fgHudless++;
 			bool dynamic = (fd.createFlags & FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION) != 0;
 			uint32_t keyW = dynamic ? (fd.maxRenderW > fd.renderW ? fd.maxRenderW : fd.renderW) : fd.renderW;
 			uint32_t keyH = dynamic ? (fd.maxRenderH > fd.renderH ? fd.maxRenderH : fd.renderH) : fd.renderH;
 			FgPrepare(fd, l, keyW, keyH);
 		}
-		else g.fgPending = g.fgHavePrevious = false;
+		else { g.hudlessCaptured = false; g.fgPending = g.fgHavePrevious = false; }
 
 		for (int i = 0; i < 4; i++)
 		{
@@ -1556,9 +1559,10 @@ EXPORT uint64_t FSR4_GetViews(void** color, void** motion, void** output)
 
 EXPORT uint64_t FSR4_GetHudlessView(void** hudless)
 {
+	if (!hudless) return 0;
 	std::lock_guard<std::mutex> l(g_viewLock);
-	*hudless = nullptr;
-	return 0;
+	*hudless = g.hudlessCaptured ? g.output.srv.Get() : nullptr;
+	return *hudless ? g_viewGen : 0;
 }
 
 EXPORT void FSR4_ViewsInUse(uint64_t gen)
