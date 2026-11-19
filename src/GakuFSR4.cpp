@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "MipBias.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -32,6 +33,7 @@ void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
 }
 void Stop(const std::string& why) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
 
@@ -201,7 +203,7 @@ struct Capture {
 Capture& capture=*new Capture;
 struct History {
     int frame=-1,id=0,w=0,h=0;
-    float fov=0,pos[3]{};
+    float fov=0,pos[3]{},forward[3]{};
 } history;
 std::atomic<uint64_t> submitted{0}, completed{0};
 int configuredFrame=-1;
@@ -282,6 +284,10 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
             std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)+
             (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")); }
+        static bool reportedBias=false;
+        if(!reportedBias&&ratio>1) { reportedBias=true;Log("FSR recommended Mip LOD bias at ratio "+
+            std::to_string(ratio)+": "+std::to_string(RecommendedFsrMipBias(ratio))+
+            "; informational only (Unity URP may already apply a global Mip Bias)"); }
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 
@@ -384,15 +390,16 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     using Vec3=std::array<float,3>;
     P transform=api.Invoke(method.transform,capture.camera.Get());
     auto pos=api.Value<Vec3>(method.position,transform);
+    auto forward=api.Value<Vec3>(method.forward,transform);
     fd.reset=frame_math::Reset(capture.id,history.id,capture.frame,history.frame,fov,history.fov,pos.data(),history.pos)||
-        history.w!=w||history.h!=h;
+        history.w!=w||history.h!=h||frame_math::RotationJump(forward.data(),history.forward);
     auto taa=static_cast<char*>(cd)+field.taaSettings;
     fd.reset|=At<int>(taa,field.reset)>0;
     if(frameGeneration) {
         fd.fg=1;
         std::copy(pos.begin(),pos.end(),fd.camPos);
-        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight},
-                              std::pair{method.forward,fd.camFwd}}) {
+        std::copy(forward.begin(),forward.end(),fd.camFwd);
+        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight}}) {
             auto axis=api.Value<Vec3>(getter,transform);
             std::copy(axis.begin(),axis.end(),dst);
         }
@@ -402,6 +409,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     packet.release();submitted.fetch_add(1);
     history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
     std::copy(pos.begin(),pos.end(),history.pos);
+    std::copy(forward.begin(),forward.end(),history.forward);
 }
 
 void Final(P self,P cmd,P rd,M mi) {
@@ -547,10 +555,10 @@ void Bind() {
     method.transform=api.Method(api.Class("UnityEngine","Component"),"get_transform",{});
     auto transform=api.Class("UnityEngine","Transform");
     method.position=api.Method(transform,"get_position",{});
+    method.forward=api.Method(transform,"get_forward",{});
     if(frameGeneration) {
         method.up=api.Method(transform,"get_up",{});
         method.right=api.Method(transform,"get_right",{});
-        method.forward=api.Method(transform,"get_forward",{});
     }
     method.frame=api.Method(api.Class("UnityEngine","Time"),"get_frameCount",{});
     method.time=api.Method(api.Class("UnityEngine","Time"),"get_unscaledDeltaTime",{});
@@ -637,6 +645,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
