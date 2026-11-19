@@ -25,8 +25,8 @@ inline int RenderSize(int display, float ratio) {
         throw std::runtime_error("Invalid render dimensions or ratio");
     return (std::max)(1, static_cast<int>(display / ratio));
 }
-inline float Jitter(float matrixOffset, int renderSize) {
-    return -matrixOffset * renderSize * 0.5f;
+inline float Jitter(float matrixOffset, int renderSize, int sign = -1) {
+    return sign * matrixOffset * renderSize * 0.5f;
 }
 inline bool Reset(int camera, int oldCamera, int frame, int oldFrame,
                   float fov, float oldFov, const float* pos, const float* oldPos) {
