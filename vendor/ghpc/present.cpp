@@ -6,7 +6,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include "GakuPlugin.h"
+#include "../../src/PresentHookSlots.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -23,8 +25,8 @@ namespace
 	using CreateForHwndFn = HRESULT (STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
 		const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
 
-	PresentFn g_present = nullptr;
-	Present1Fn g_present1 = nullptr;
+	std::mutex g_slotsLock;
+	PresentHookSlots g_slots;
 	CreateFn g_create = nullptr;
 	CreateForHwndFn g_createForHwnd = nullptr;
 	std::atomic<bool> g_capture{ false };
@@ -33,6 +35,25 @@ namespace
 	std::atomic<HWND> g_window{ nullptr };
 	std::atomic<uint64_t> g_presents{ 0 };
 	thread_local bool g_inHook = false;
+
+	void* OriginalSlot(IDXGISwapChain* chain, size_t index)
+	{
+		void** vtable = *reinterpret_cast<void***>(chain);
+		std::lock_guard<std::mutex> lock(g_slotsLock);
+		return g_slots.Find(&vtable[index]);
+	}
+
+	HRESULT CallPresent(IDXGISwapChain* chain, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS*)
+	{
+		auto original = reinterpret_cast<PresentFn>(OriginalSlot(chain, 8));
+		return original ? original(chain, sync, flags) : DXGI_ERROR_INVALID_CALL;
+	}
+
+	HRESULT CallPresent1(IDXGISwapChain* chain, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters)
+	{
+		auto original = reinterpret_cast<Present1Fn>(OriginalSlot(chain, 22));
+		return original ? original(static_cast<IDXGISwapChain1*>(chain), sync, flags, parameters) : DXGI_ERROR_INVALID_CALL;
+	}
 
 	const char* EffectName(DXGI_SWAP_EFFECT e)
 	{
@@ -65,23 +86,22 @@ namespace
 
 	HRESULT STDMETHODCALLTYPE PresentHook(IDXGISwapChain* sc, UINT sync, UINT flags)
 	{
-		return PresentWrapped(sc, sync, flags, [](IDXGISwapChain* chain, UINT interval, UINT options,
-			const DXGI_PRESENT_PARAMETERS*) { return g_present(chain, interval, options); }, nullptr);
+		return PresentWrapped(sc, sync, flags, &CallPresent, nullptr);
 	}
 
 	HRESULT STDMETHODCALLTYPE Present1Hook(IDXGISwapChain1* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* p)
 	{
-		return PresentWrapped(sc, sync, flags, [](IDXGISwapChain* chain, UINT interval, UINT options,
-			const DXGI_PRESENT_PARAMETERS* params) {
-			return g_present1(static_cast<IDXGISwapChain1*>(chain), interval, options, params);
-		}, p);
+		return PresentWrapped(sc, sync, flags, &CallPresent1, p);
 	}
 
-	bool Patch(void** slot, void* hook, void** original)
+	bool Patch(void** slot, void* hook)
 	{
+		std::lock_guard<std::mutex> lock(g_slotsLock);
+		if (g_slots.Find(slot)) return true; // same vtable already hooked
+		if (*slot == hook) { BridgeLog("Present hook: slot already points at our callback but no original is registered."); return false; }
 		DWORD was = 0;
 		if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &was)) { BridgeLog("Present hook: VirtualProtect failed (error %lu).", GetLastError()); return false; }
-		*original = *slot;
+		g_slots.Remember(slot, *slot); // visible before the vtable pointer is replaced
 		InterlockedExchangePointer(slot, hook);
 		VirtualProtect(slot, sizeof(void*), was, &was);
 		return true;
@@ -90,15 +110,16 @@ namespace
 	void HookChain(IDXGISwapChain* chain)
 	{
 		// The actual Unity chain and a temporary chain can have different vtables.
-		if (g_hooked) return;
 		auto vtable = *reinterpret_cast<void***>(chain);
-		const bool present = Patch(&vtable[8], reinterpret_cast<void*>(&PresentHook), reinterpret_cast<void**>(&g_present));
+		const bool present = Patch(&vtable[8], reinterpret_cast<void*>(&PresentHook));
 		ComPtr<IDXGISwapChain1> chain1;
 		bool present1 = false;
-		if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1))))
-			present1 = Patch(&(*reinterpret_cast<void***>(chain1.Get()))[22],
-				reinterpret_cast<void*>(&Present1Hook), reinterpret_cast<void**>(&g_present1));
-		g_hooked = present || present1;
+		if (SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&chain1)))) {
+			void** vtable1 = *reinterpret_cast<void***>(chain1.Get());
+			Patch(&vtable1[8], reinterpret_cast<void*>(&PresentHook));
+			present1 = Patch(&vtable1[22], reinterpret_cast<void*>(&Present1Hook));
+		}
+		if (present || present1) g_hooked = true;
 		BridgeLog("Present hook: Present=%d Present1=%d.", present, present1);
 	}
 
@@ -186,9 +207,18 @@ bool CaptureGameSwapChain(const GakuHookService& hooks)
 
 void InstallPresentHook(ID3D11Resource* anchor)
 {
-	if (!g_capture) Hook(anchor);
+	// Also probe a temporary chain when factory hooks were installed after
+	// Unity's swap chain already existed. Patch() deduplicates shared vtables.
+	Hook(anchor);
 }
 
-bool IsPresentWindow(HWND window) { return !g_capture || window == g_window.load(); }
+bool IsPresentWindow(HWND window) {
+	if (!g_capture) return true;
+	if (HWND known = g_window.load()) return known == window;
+	wchar_t name[64]{};
+	if (!GetClassNameW(window, name, _countof(name)) || wcscmp(name, L"UnityWndClass") != 0) return false;
+	g_window = window;
+	return true;
+}
 bool PresentHooked() { return g_hooked; }
 uint64_t PresentsSeen() { return g_presents.load(); }
