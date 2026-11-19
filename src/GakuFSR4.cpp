@@ -606,6 +606,22 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
+    if(frameGeneration) {
+        float k1=0,k2=0,centerX=.5f,centerY=.5f;
+        const auto readField=[&](const wchar_t* name,const wchar_t* fallback,float& result) {
+            wchar_t text[64];
+            GetPrivateProfileStringW(L"FSR4",name,fallback,text,64,config.c_str());
+            wchar_t* end=nullptr;
+            result=wcstof(text,&end);
+            return end && end!=text && !*end && std::isfinite(result);
+        };
+        if(!readField(L"FGDistortionK1",L"0",k1) || !readField(L"FGDistortionK2",L"0",k2) ||
+           !readField(L"FGDistortionCenterX",L"0.5",centerX) || !readField(L"FGDistortionCenterY",L"0.5",centerY) ||
+           !FSR4_SetFgRadialDistortion(k1,k2,centerX,centerY)) {
+            Log("Invalid FG radial distortion settings; disabling frame generation",GAKU_LOG_ERROR);
+            frameGeneration=false;
+        }
+    }
     if(frameGeneration&&!CaptureGameSwapChain(hooks))
         Log("DXGI factory hook unavailable; using a temporary swap chain for the Present hook",GAKU_LOG_WARNING);
     enabled=true;*state=nullptr;return GAKU_OK;
