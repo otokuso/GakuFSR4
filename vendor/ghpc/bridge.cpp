@@ -218,6 +218,8 @@ namespace
 
 		ffxContext fg = nullptr;
 		uint32_t fgDisplayW = 0, fgDisplayH = 0, fgRenderW = 0, fgRenderH = 0, fgFlags = 0;
+		bool fgScRgb = false;
+		float fgMinNits = 0.0f, fgMaxNits = 1000.0f;
 		bool fgProvidersListed = false;
 		bool fgUnavailable = false;
 		FgRetry fgRetry;
@@ -511,6 +513,7 @@ namespace
 		g_fgDropNotice.SetTarget(nullptr);
 		g.fgCrossThread = false;
 		g.fgContent = {};
+		g.fgScRgb = false;
 		g.inValue = g.outValue = 0;
 		g.expValue = 0;
 		g.providersListed = false;
@@ -1100,6 +1103,8 @@ void main(uint3 id : SV_DispatchThreadID)
 			if (!FgViewportWithinBackbuffer(g.fgContent, displayW, displayH, fd.displayW, fd.displayH)) return false;
 		}
 		uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
+		const bool scRgb = !nativePresent.chain && g.fgScRgb;
+		if (scRgb) flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
 		if (g.fg && g.fgDisplayW == displayW && g.fgDisplayH == displayH && g.fgRenderW == keyW && g.fgRenderH == keyH && g.fgFlags == flags) return true;
 		if (!WaitIdle("new FG context")) return false;
 		DestroyFg();
@@ -1115,7 +1120,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		desc.flags = flags;
 		desc.displaySize = { displayW, displayH };
 		desc.maxRenderSize = { keyW, keyH };
-		desc.backBufferFormat = FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+		desc.backBufferFormat = scRgb ? FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT : FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
 		desc.header.pNext = &backend.header;
 		backend.header.pNext = &version.header;
 		ffxReturnCode_t rc = g.fx.CreateContext(&g.fg, &desc.header, nullptr);
@@ -1760,19 +1765,22 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	ComPtr<ID3D11Texture2D> bb;
 	D3D11_TEXTURE2D_DESC bd{};
 	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) bb->GetDesc(&bd);
+	const DXGI_FORMAT format = Typed(bd.Format);
+	// DXGI defaults FP16 swap chains to linear scRGB.
+	const bool scRgb = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 	if (!bd.Width || !bd.Height || !g.fgSceneW || !g.fgSceneH ||
-		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM)
+		bd.SampleDesc.Count != 1 || (format != DXGI_FORMAT_R8G8B8A8_UNORM && !scRgb))
 	{
 		static std::set<DXGI_FORMAT> warned;
 		if (warned.insert(bd.Format).second) {
-			Log("FG waiting for a compatible RGBA8 backbuffer: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), samples %u.",
+			Log("FG waiting for a compatible RGBA8 or scRGB backbuffer: scene %ux%u, backbuffer %ux%u, %s (DXGI format %u), samples %u.",
 				g.fgSceneW, g.fgSceneH, bd.Width, bd.Height, FgBackbufferFormatName(bd.Format),
 				bd.Format, bd.SampleDesc.Count);
 		}
 		g.stats.fgSkipped++;
 		g.fgHavePrevious = false;
 		g.fgContent = {};
-		g_fgSkipReason = "Incompatible backbuffer (FG requires single-sample RGBA8)";
+		g_fgSkipReason = "Incompatible backbuffer (FG requires single-sample RGBA8 or scRGB)";
 		return false;
 	}
 	const ImageRect content = g.fgViewportOverrideEnabled ? g.fgViewportOverride :
@@ -1801,6 +1809,14 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
 	const bool scaled = letterboxed || bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
 	g.fgContent = content;
+	if (scRgb != g.fgScRgb) {
+		g.fgScRgb = scRgb;
+		g.fgRefreshFrames = 0;
+		g.fgHavePrevious = false;
+		g.stats.fgSkipped++;
+		g_fgSkipReason = "Backbuffer format changed";
+		return false;
+	}
 	if (previous.x != content.x || previous.y != content.y ||
 		previous.width != content.width || previous.height != content.height)
 	{
@@ -1837,6 +1853,18 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		dm.dmSize = sizeof dm;
 		if (GetMonitorInfoW(MonitorFromWindow(chain.OutputWindow, MONITOR_DEFAULTTONEAREST), &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
 			g.stats.fgRefreshHz = (float)dm.dmDisplayFrequency;
+		if (scRgb) {
+			ComPtr<IDXGIOutput> output;
+			ComPtr<IDXGIOutput6> extended;
+			DXGI_OUTPUT_DESC1 desc{};
+			g.fgMinNits = 0.0f;
+			g.fgMaxNits = 1000.0f;
+			if (SUCCEEDED(sc->GetContainingOutput(&output)) && SUCCEEDED(output.As(&extended)) &&
+				SUCCEEDED(extended->GetDesc1(&desc)) && desc.MinLuminance >= 0.0f && desc.MaxLuminance > desc.MinLuminance) {
+				g.fgMinNits = desc.MinLuminance;
+				g.fgMaxNits = desc.MaxLuminance;
+			}
+		}
 	}
 	double refreshMs = g.stats.fgRefreshHz > 1 ? 1000.0 / g.stats.fgRefreshHz : 0.0;
 	double intervalMs = g.fgIntervalTicks * 1000.0 / qf.QuadPart;
@@ -1852,8 +1880,8 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	bool ok = EnsureShared(g.present, bb.Get(), false, "present colour", false) && EnsureShared(g.gen, bb.Get(), true, "generated frame", false);
 	if (ok && scaled)
 		ok = EnsureScale() &&
-			MakeShared(g.fgColor, g.fgDisplayW, g.fgDisplayH, DXGI_FORMAT_R8G8B8A8_UNORM, true, "scaled FG input", false, -1) &&
-			MakeShared(g.fgOutput, g.fgDisplayW, g.fgDisplayH, DXGI_FORMAT_R8G8B8A8_UNORM, true, "scaled FG output", false, -1);
+			MakeShared(g.fgColor, g.fgDisplayW, g.fgDisplayH, format, true, "scaled FG input", false, -1) &&
+			MakeShared(g.fgOutput, g.fgDisplayW, g.fgDisplayH, format, true, "scaled FG output", false, -1);
 	if (!ok) {
 		const uint32_t delay = g.fgRetry.Failed(GetTickCount64(), false);
 		g.fgHavePrevious = false;
@@ -1892,9 +1920,9 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	d.outputs[0] = ffxApiGetResourceDX12(output.t12.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
 	d.numGeneratedFrames = 1;
 	d.reset = g.fgPendingReset || !g.fgHavePrevious;
-	d.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-	d.minMaxLuminance[0] = 0.0f;
-	d.minMaxLuminance[1] = 1.0f;
+	d.backbufferTransferFunction = scRgb ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+	d.minMaxLuminance[0] = scRgb ? g.fgMinNits : 0.0f;
+	d.minMaxLuminance[1] = scRgb ? g.fgMaxNits : 1.0f;
 	d.generationRect = { 0, 0, (int32_t)g.fgDisplayW, (int32_t)g.fgDisplayH };
 	d.frameID = g.fgFrameId;
 	l->EndQuery(g.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);

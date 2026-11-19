@@ -147,7 +147,7 @@ AMD公式SwapChain方式でも、ドライバー側のペーシング機構（DA
 
 **現時点でのFGの主な制約**
 
-- **SDR / RGBA8の対応するバックバッファ**が対象です。BGRA8、RGB10A2、RGBA16FやHDR表示についてはFG対応が未完成で、未対応条件では実フレーム表示へ戻します。
+- **RGBA8 SDRとRGBA16F scRGB**のバックバッファに対応します。ReShadeのAutoHDRと併用する場合は `FrameGeneration=1` と `NativeSwapChain=0` を設定してください。BGRA8やRGB10A2では実フレームを表示します。
 - FGの入力には最終的な合成映像を使うため、画面内のUIや字幕まで補間される場合があります。UIを完全に分離して後から合成する処理は未実装です。
 - 黒帯のある画面では中央の映像領域を対象にし、黒帯などを実フレームから残します。中央以外の映像配置に対する自動Viewport検出は未実装です。
 - 表示間隔が短すぎる、対応するシーンを取得できない、GPU側で失敗した等の場合は、補間フレームをスキップします。
@@ -197,7 +197,7 @@ python scripts\analyze_presentmon.py --warmup 120 --require-input baseline.csv m
 | --- | --- |
 | F1にGakuFSR4が出ない | `GakuFSR4.dll` の配置先、GakuLoaderの導入状況、ログを確認 |
 | FSRが動作しない | `Enabled=1`、AMDのloader/upscaler DLL、対応GPU、`FSR active` / `AMD FSR DLL loading failed` 等のログを確認 |
-| FGが動作しない | `FrameGeneration=1`、FG用DLL、Windows/GPU要件、SDR/RGBA8形式、`Last FG skip` を確認。条件に合わなければ補間されません |
+| FGが動作しない | `FrameGeneration=1`、FG用DLL、Windows/GPU要件、バックバッファ形式、`Last FG skip` を確認。条件に合わなければ補間されません |
 | FGで画面が乱れる・カクつく | `NativeSwapChain=0` に戻して再起動し、手動FGと比較。解決しなければ `FrameGeneration=0` で比較 |
 | 設定を変えたのに反映されない | `Save settings` を押したか、正しいINIを編集したか確認し、**ゲームを再起動** |
 | 入力遅延が `--` になる | 入力イベントを取得できないケースがあります。値がない状態であって、遅延がゼロという意味ではありません |

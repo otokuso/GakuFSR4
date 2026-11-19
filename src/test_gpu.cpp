@@ -33,7 +33,8 @@ int wmain(int argc,wchar_t** argv) {
     const bool fgLetterbox=argc==4&&wcscmp(argv[3],L"--fg-letterbox")==0;
     const bool fgOffset=argc==4&&wcscmp(argv[3],L"--fg-offset")==0;
     const bool fgCross=fgOffset||(argc==4&&wcscmp(argv[3],L"--fg-cross")==0);
-    const bool fgResized=fgScaled||fgLetterbox||fgCross;
+    const bool fgScRgb=argc==4&&wcscmp(argv[3],L"--fg-scrgb")==0;
+    const bool fgResized=fgScaled||fgLetterbox||fgCross||fgScRgb;
     const bool fgDistortion=argc==4&&wcscmp(argv[3],L"--fg-distortion")==0;
     const bool fgHudless=argc==4&&wcscmp(argv[3],L"--fg-hudless")==0;
     const bool fgBgra=argc==4&&wcscmp(argv[3],L"--fg-bgra")==0;
@@ -109,8 +110,9 @@ int wmain(int argc,wchar_t** argv) {
             Check(adapter->GetParent(IID_PPV_ARGS(&factory)));
             DXGI_SWAP_CHAIN_DESC1 desc{};
             desc.Width=fgCross?1920:fgResized?dw/2:dw;
-            desc.Height=fgCross?1080:fgLetterbox?1080:fgScaled?dh/2:dh;
-            desc.Format=fgBgra?DXGI_FORMAT_B8G8R8A8_UNORM:fgRgb10?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.Height=fgCross?1080:fgLetterbox?1080:fgResized?dh/2:dh;
+            desc.Format=fgBgra?DXGI_FORMAT_B8G8R8A8_UNORM:fgRgb10?DXGI_FORMAT_R10G10B10A2_UNORM:
+                fgScRgb?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
             desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
             if(fgLetterbox) desc.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -231,7 +233,7 @@ int wmain(int argc,wchar_t** argv) {
             ComPtr<ID3D11RenderTargetView> target;
             Check(swapChain->GetBuffer(0,IID_PPV_ARGS(&backbuffer)));
             Check(device->CreateRenderTargetView(backbuffer.Get(),nullptr,&target));
-            const float rgba[]{0.2f+i*0.05f,0.3f,0.4f,1};
+            const float rgba[]{(fgScRgb?2.0f:0.2f)+i*0.05f,0.3f,0.4f,1};
             ctx->ClearRenderTargetView(target.Get(),rgba);
             Sleep(50);
             UINT before=0,after=0;
