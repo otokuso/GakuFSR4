@@ -1,7 +1,9 @@
 import math
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
-from scripts.summarize_frametimes import percentile, summarize
+from scripts.summarize_frametimes import percentile, read_intervals, summarize
 
 
 class FrametimeTests(unittest.TestCase):
@@ -23,6 +25,17 @@ class FrametimeTests(unittest.TestCase):
             summarize([])
         with self.assertRaises(ValueError):
             summarize([10, math.nan])
+
+    def test_primary_swapchain_uses_displayed_intervals_from_one_process(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.csv"
+            path.write_text(
+                "ProcessID,SwapChainAddress,MsBetweenDisplayChange\n"
+                "1,0xa,NA\n2,0xb,NA\n2,0xb,NA\n2,0xb,NA\n2,0xb,NA\n"
+                "2,0xa,20\n2,0xa,20\n1,0xa,8\n1,0xa,9\n1,0xa,10\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(read_intervals(path, "MsBetweenDisplayChange", 1, primary_swapchain=True), [9, 10])
 
 
 if __name__ == "__main__":
