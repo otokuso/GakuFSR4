@@ -24,6 +24,7 @@
 #include "../../src/BridgeStats.h"
 #include "../../src/FgErrorBurst.h"
 #include "../../src/FgRetry.h"
+#include "../../src/FgViewportMath.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -152,10 +153,7 @@ namespace
 		}
 	};
 
-	struct ImageRect
-	{
-		UINT x, y, width, height;
-	};
+	using ImageRect = FgImageRect;
 
 	const int Slots = 6;
 	const DWORD FrameWaitMs = 2000, IdleWaitMs = 5000;
@@ -915,19 +913,13 @@ void main(uint3 id : SV_DispatchThreadID)
 
 	bool MatchingAspectRatio(UINT w, UINT h, UINT sceneW, UINT sceneH)
 	{
-		if (!w || !h || !sceneW || !sceneH) return false;
-		double ratio = double(w) * sceneH / (double(h) * sceneW);
-		return ratio >= 0.99 && ratio <= 1.01;
+		return FgMatchingAspectRatio(w, h, sceneW, sceneH);
 	}
 
 	ImageRect FitScene(UINT w, UINT h, UINT sceneW, UINT sceneH)
 	{
-		if (MatchingAspectRatio(w, h, sceneW, sceneH)) return {0, 0, w, h};
 		// shortcut: uses the game's centered aspect-fit placement, read the compositing viewport if a scene uses an offset.
-		const double scale = min(double(w) / sceneW, double(h) / sceneH);
-		const UINT width = min(w, max(1u, static_cast<UINT>(scale * sceneW + 0.5)));
-		const UINT height = min(h, max(1u, static_cast<UINT>(scale * sceneH + 0.5)));
-		return {(w - width) / 2, (h - height) / 2, width, height};
+		return FgAspectFit(w, h, sceneW, sceneH);
 	}
 
 	bool EnsureFg(const FrameData& fd, uint32_t keyW, uint32_t keyH)
@@ -1315,7 +1307,6 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	D3D11_TEXTURE2D_DESC bd{};
 	if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) bb->GetDesc(&bd);
 	if (!bd.Width || !bd.Height || !g.fgSceneW || !g.fgSceneH ||
-		(bd.Width >= bd.Height) != (g.fgSceneW >= g.fgSceneH) ||
 		bd.SampleDesc.Count != 1 || Typed(bd.Format) != DXGI_FORMAT_R8G8B8A8_UNORM)
 	{
 		static std::set<DXGI_FORMAT> warned;
