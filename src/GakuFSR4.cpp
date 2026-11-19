@@ -384,7 +384,9 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     fd.cameraNear=api.Value<float>(method.nearPlane,capture.camera.Get());
     fd.cameraFar=api.Value<float>(method.farPlane,capture.camera.Get());
     float fov=api.Value<float>(method.fov,capture.camera.Get());
-    fd.fovV=fov*0.01745329252f;fd.sharpness=sharpness;fd.exposure=1;
+    // The game exposure is not captured by this integration. Zero tells the
+    // bridge to retain SDK auto exposure rather than fabricating 1.0.
+    fd.fovV=fov*0.01745329252f;fd.sharpness=sharpness;fd.exposure=0;
     fd.createFlags=FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
     if(At<P>(cd,field.target)&&At<bool>(cd,field.hdr)) fd.createFlags|=FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
     if(api.Value<bool>(method.reversed)) fd.createFlags|=FFX_UPSCALE_ENABLE_DEPTH_INVERTED;

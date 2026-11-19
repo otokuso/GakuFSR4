@@ -4,6 +4,7 @@
 #include "FgRetry.h"
 #include "MipBias.h"
 #include "FgViewportMath.h"
+#include "ExposurePolicy.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
 #include <cassert>
@@ -93,6 +94,10 @@ int main() {
     auto same = FgAspectFit(1920,1080,1280,720);
     assert(same.x==0 && same.y==0 && same.width==1920 && same.height==1080);
     assert(FgAspectFit(1920,1080,0,1080).width==0);
+    assert(!HasExternalExposure(true,0.0f));
+    assert(!HasExternalExposure(false,1.25f));
+    assert(HasExternalExposure(true,1.25f));
+    assert(!HasExternalExposure(true,INFINITY));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
