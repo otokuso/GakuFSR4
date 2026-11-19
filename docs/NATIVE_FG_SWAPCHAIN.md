@@ -20,3 +20,7 @@ cmake --build build --config Release --target test_native_swapchain
 Record the exact SDK return code, adapter, driver, OS build, whether the green test window appears, and the present/fence results. This requires real hardware; a hosted CI VM cannot validate it.
 
 **Still required before integrating into the game:** intercept or proxy the real D3D11 swapchain's `GetBuffer`, `Present` and `ResizeBuffers`; preserve Unity's backbuffer ownership semantics; register FG prepare/interpolation callbacks; verify generated frames and driver-assisted frame pacing; handle UI, HDR, device loss, fullscreen and Alt+Tab; compare frame pacing and latency with the existing manual Present fallback. Do not switch the game path merely because this separate test succeeds.
+
+## Hardware result, 2026-11-19
+
+The stand-alone proof of concept returned success on RX 9070 XT (driver 32.0.32015.16001), Windows 11 build 26300, and the SDK v2.4.0 runtime. The official AMD D3D12 SwapChain accepted the D3D11 shared-color copy and Present, and the shared fence completed. This verifies the first interoperability milestone. Visual scanout inspection, generated-frame callbacks, DAFP and game integration remain future verification.
