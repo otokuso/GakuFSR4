@@ -139,6 +139,8 @@ namespace
 
 	std::mutex g_ffxMsgLock;
 	std::map<std::string, uint64_t> g_ffxMsgCount;
+	std::mutex g_timerLock;
+	bool g_timerRequested = false;
 
 	void OnFfxMessage(uint32_t type, const wchar_t* message)
 	{
@@ -260,6 +262,8 @@ namespace
 		uint64_t fgRefreshFrames = 0;
 		double fgIntervalTicks = 0;
 		bool fgOffLogged = true;
+		uint32_t fgPaceSamples = 0;
+		double fgPaceBusyMs = 0, fgPaceBusyMaxMs = 0, fgPaceLateMs = 0, fgPaceLateMaxMs = 0;
 	};
 	// The host never unloads plugins. COM teardown under the DLL loader lock can fail-fast in the driver.
 	State& g = *new State;
@@ -398,6 +402,8 @@ namespace
 		g.fgPending = g.fgHavePrevious = false;
 		g.fgLastEntry = 0;
 		g.fgIntervalTicks = 0;
+		g.fgPaceSamples = 0;
+		g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		g.stats.fgProviderId = 0;
 		g.stats.fgProvider[0] = 0;
 		g.stats.fgMemory = 0;
@@ -1060,13 +1066,31 @@ void main(uint3 id : SV_DispatchThreadID)
 		LARGE_INTEGER f, now;
 		QueryPerformanceFrequency(&f);
 		LONGLONG until = from + (LONGLONG)(ms * f.QuadPart / 1000.0);
+		LONGLONG busyStart = 0;
 		for (;;)
 		{
 			QueryPerformanceCounter(&now);
 			LONGLONG left = until - now.QuadPart;
-			if (left <= 0) return;
+			if (left <= 0) break;
 			if (left * 1000.0 / f.QuadPart > 1.5) Sleep(1);
-			else YieldProcessor();
+			else {
+				if (!busyStart) busyStart = now.QuadPart;
+				YieldProcessor();
+			}
+		}
+		// Sample existing behavior before changing the wait strategy; no extra sleeps or yields.
+		const double msPerTick = 1000.0 / f.QuadPart;
+		const double busyMs = busyStart ? (now.QuadPart - busyStart) * msPerTick : 0.0;
+		const double lateMs = (now.QuadPart - until) * msPerTick;
+		g.fgPaceBusyMs += busyMs;
+		g.fgPaceLateMs += lateMs;
+		g.fgPaceBusyMaxMs = max(g.fgPaceBusyMaxMs, busyMs);
+		g.fgPaceLateMaxMs = max(g.fgPaceLateMaxMs, lateMs);
+		if (++g.fgPaceSamples == 600) {
+			Log("FG manual Pace over 600 waits: avg busy-spin %.3f ms, max %.3f ms; avg deadline overshoot %.3f ms, max %.3f ms. Compare with CPU usage and PresentMon.",
+				g.fgPaceBusyMs / 600, g.fgPaceBusyMaxMs, g.fgPaceLateMs / 600, g.fgPaceLateMaxMs);
+			g.fgPaceSamples = 0;
+			g.fgPaceBusyMs = g.fgPaceBusyMaxMs = g.fgPaceLateMs = g.fgPaceLateMaxMs = 0;
 		}
 	}
 
@@ -1474,7 +1498,12 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	{
 		g.ctx->CopyResource(bb2.Get(), g.present.t11.Get());
 		*hr = original(sc, realSync, pairFlags, parameters);
-		g.stats.fgReal++;
+		if (SUCCEEDED(*hr)) g.stats.fgReal++;
+		else
+		{
+			g.fgHavePrevious = false;
+			Log("FG real frame Present failed: 0x%08X.", (unsigned)*hr);
+		}
 	}
 	else *hr = DXGI_ERROR_INVALID_CALL;
 	LARGE_INTEGER t3;
@@ -1501,16 +1530,31 @@ EXPORT int FSR4_Load(const wchar_t* dir)
 
 EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 {
-	if (g.fgDll) return 1;
-	std::wstring d(dir);
-	if (!d.empty() && d.back() != L'\\') d += L'\\';
-	g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 	if (!g.fgDll) {
-		Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
-		return 0;
+		std::wstring d(dir);
+		if (!d.empty() && d.back() != L'\\') d += L'\\';
+		g.fgDll = LoadLibraryExW((d + L"amd_fidelityfx_framegeneration_dx12.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+		if (!g.fgDll) {
+			Log("Could not load amd_fidelityfx_framegeneration_dx12.dll: error %lu. Continuing with upscaling.", GetLastError());
+			return 0;
+		}
 	}
-	timeBeginPeriod(1);
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) {
+		MMRESULT result = timeBeginPeriod(1);
+		if (result == TIMERR_NOERROR) g_timerRequested = true;
+		else Log("FG could not request 1ms timer resolution: %u.", (unsigned)result);
+	}
 	return 1;
+}
+
+EXPORT void FSR4_StopFrameGenerationTimer()
+{
+	std::lock_guard<std::mutex> lock(g_timerLock);
+	if (!g_timerRequested) return;
+	MMRESULT result = timeEndPeriod(1);
+	if (result == TIMERR_NOERROR) g_timerRequested = false;
+	else Log("FG could not release 1ms timer resolution: %u.", (unsigned)result);
 }
 
 EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
