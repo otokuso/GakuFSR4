@@ -17,7 +17,7 @@ For HDR testing, capture the backbuffer format, successful swap-chain color-spac
 
 ## Decision and hardware verification
 
-Keep the manual path RGBA8 SDR-only. Use a format-aware draw, rather than a raw CopyResource, if BGRA8 conversion is integrated later. Defer manual HDR support until the bridge can propagate the actual swap-chain color space and luminance and verify HDR UI composition. Neither RGB10A2 storage nor an HDR desktop mode establishes the encoding of the game's backbuffer. The optional native path remains tracked separately in #23 and UI composition in #9.
+Keep the manual path RGBA8 SDR-only. A future BGRA8 conversion should use a format-aware draw to preserve channel order. Defer manual HDR support until the bridge can propagate the actual swap-chain color space and luminance and verify HDR UI composition. Read the game's encoding from the active swap-chain color space. RGB10A2 storage and HDR desktop mode describe separate properties. The optional native path remains tracked separately in #23 and UI composition in #9.
 
 On 2026-11-19 the game logged format 28 (RGBA8 UNORM) at 1920×1080 and 3840×2160. On Windows 11 build 26300 and Radeon RX 9070 XT (driver 32.0.32015.16001), the stand-alone harness verified:
 
