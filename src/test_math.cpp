@@ -16,6 +16,10 @@ static_assert(!frame_math::UpscaleSource(1441,2560,1440,2560,2160,3840));
 static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
+static_assert(frame_math::EarlyNativeAA(true,false,1.0f));
+static_assert(!frame_math::EarlyNativeAA(false,false,1.0f));
+static_assert(!frame_math::EarlyNativeAA(true,true,1.0f));
+static_assert(!frame_math::EarlyNativeAA(true,false,1.5f));
 int main() {
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
