@@ -22,8 +22,16 @@ python scripts\summarize_frametimes.py --column MsBetweenPresents --warmup 120 b
 python -m unittest discover -s tests
 ```
 
+For a PresentMon 2.x capture filtered to the game process, use the display interval and select the swap chain with the most valid intervals:
+
+```powershell
+python scripts\summarize_frametimes.py --column MsBetweenDisplayChange --primary-swapchain --warmup 120 live.csv
+```
+
+Check the selected swap chain against the raw CSV if the capture has multiple active windows or spans a resize. Compare `MsBetweenDisplayChange` across runs to measure displayed FPS.
+
 The script emits comparative CSV: average FPS (1000 / mean frame interval), 1% low FPS (1000 / mean of the slowest 1% of intervals), 95th/99th-percentile interval and longest interval. These are frame-presentation metrics, not a direct measure of input latency. Use the same definition of 1% low for every comparison.
 
 Also record average/peak VRAM use, CPU load, `cpuMs`, `gpuMs`, `fgGpuMs`, `flushMs` where available and screenshots of moving detail, transparency, HUD, Bloom/DOF and camera pans. If the bridge reports zero for a counter, mark it **unavailable** rather than assuming the cost was zero.
 
-No benchmark scores are included here: measurements must be collected on the target Windows/Radeon system.
+An initial live-scene capture on the Radeon RX 9070 XT measured 119.19 displayed FPS, 66.04 FPS for the 1% low, and 12.58 ms p95 after discarding the first 120 display intervals. The paired runs in the table are still needed to measure the effect of each render mode and frame generation.

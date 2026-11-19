@@ -33,22 +33,26 @@ def summarize(times_ms):
     }
 
 
-def read_intervals(path, column, warmup):
+def read_intervals(path, column, warmup, primary_swapchain=False):
     with path.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
-        if not reader.fieldnames or column not in reader.fieldnames:
-            raise ValueError(f"{path}: missing '{column}' column; available: {reader.fieldnames}")
-        intervals = []
+        required = {column, "ProcessID", "SwapChainAddress"} if primary_swapchain else {column}
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(f"{path}: missing columns {', '.join(sorted(missing))}; available: {reader.fieldnames}")
+        groups = {}
         for row in reader:
             raw = (row.get(column) or "").strip()
-            if not raw:
+            if not raw or raw.upper() == "NA":
                 continue
             try:
                 value = float(raw)
             except ValueError as exc:
                 raise ValueError(f"{path}: invalid frame interval '{raw}'") from exc
             if math.isfinite(value) and value > 0:
-                intervals.append(value)
+                chain = (row["ProcessID"], row["SwapChainAddress"]) if primary_swapchain else None
+                groups.setdefault(chain, []).append(value)
+    intervals = max(groups.values(), key=len, default=[])
     if warmup >= len(intervals):
         raise ValueError(f"{path}: warmup {warmup} leaves no frames (read {len(intervals)})")
     return intervals[warmup:]
@@ -58,6 +62,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", type=Path, nargs="+", help="CSV captures of frame intervals in milliseconds")
     parser.add_argument("--column", default="MsBetweenPresents", help="CSV column with frame intervals in ms")
+    parser.add_argument("--primary-swapchain", action="store_true",
+                        help="use the process and swap chain with the most valid intervals per capture")
     parser.add_argument("--warmup", type=int, default=0, help="valid frames to discard at capture start")
     args = parser.parse_args(argv)
     if args.warmup < 0:
@@ -67,7 +73,7 @@ def main(argv=None):
     writer.writerow(fields)
     try:
         for path in args.files:
-            summary = summarize(read_intervals(path, args.column, args.warmup))
+            summary = summarize(read_intervals(path, args.column, args.warmup, args.primary_swapchain))
             writer.writerow([path.name] + [summary[f] if f == "frames" else f"{summary[f]:.3f}" for f in fields[1:]])
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
