@@ -20,6 +20,7 @@
 #include "dx12/ffx_api_dx12.h"
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
+#include "../../src/BridgeStats.h"
 #include "../../src/FgErrorBurst.h"
 #include <timeapi.h>
 
@@ -51,44 +52,6 @@ struct FrameData
 	void* hudless;
 	uint32_t fg;
 	float camPos[3], camUp[3], camRight[3], camFwd[3];
-};
-
-struct Stats
-{
-	uint64_t frames;
-	uint64_t providerId;
-	int32_t lastResult;
-	int32_t failed;
-	char provider[64];
-	char adapter[128];
-	uint64_t presented;
-	float cpuMs;
-	float gpuMs;
-	uint64_t fsrMemory;
-	uint64_t logDropped;
-	uint32_t bridgeStarts;
-	uint32_t contextStarts;
-	int32_t removedReason;
-	uint32_t failures;
-	// gpuPeriodMs down to markMs stay at zero in this build, nothing fills them. Left in so the layout still matches Native.cs.
-	float gpuPeriodMs, gpuPeriodMin, gpuPeriodMax;
-	float gpuBusyMs, gpuBusyMin, gpuBusyMax;
-	uint64_t gpuFrames;
-	uint64_t gpuDisjoint;
-	uint64_t gpuDropped;
-	float markMs[48];
-	float flushMs;
-	uint32_t exposureWanted;
-	uint64_t directFrames;
-	char fgProvider[64];
-	uint64_t fgProviderId, fgPrepared, fgGenerated, fgReal, fgSkipped, fgMemory;
-	int32_t fgLastResult;
-	float fgGpuMs, fgPaceMs, fgIntervalMs;
-	float fgHookMs;
-	float fgRefreshHz;
-	uint64_t fgNotNeeded;
-	uint64_t presentsHooked;
-	uint64_t fgHudless;
 };
 
 static_assert(sizeof(void*) == 8, "64-bit only");
