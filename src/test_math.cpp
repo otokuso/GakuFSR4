@@ -1,4 +1,5 @@
 #include "FrameMath.h"
+#include "FgErrorBurst.h"
 #include "MipBias.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
@@ -19,6 +20,16 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    FgErrorBurst fgErrors;
+    assert(fgErrors.Record(1, 7));
+    assert(fgErrors.Record(1, 7));
+    assert(fgErrors.Record(1, 7));
+    assert(!fgErrors.Record(1, 7));
+    assert(!fgErrors.Record(1, 7));
+    assert(fgErrors.Record(2, 7)); // new stage, new burst
+    assert(fgErrors.Record(2, 8)); // new code, new burst
+    fgErrors.Reset();
+    assert(fgErrors.Record(2, 8)); // successful frame restored logging
     assert(std::abs(RecommendedFsrMipBias(1.5f)+1.5849625f)<0.00001f);
     assert(std::abs(RecommendedFsrMipBias(1.7f)+1.7655347f)<0.00001f);
     assert(std::abs(RecommendedFsrMipBias(2.0f)+2.0f)<0.00001f);
