@@ -23,6 +23,7 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
 bool frameGeneration=false;
+int motionVectorYSign=-1;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -371,7 +372,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     fd.renderW=w;fd.renderH=h;fd.displayW=dw;fd.displayH=dh;
     fd.maxRenderW=w;fd.maxRenderH=h;
     fd.jitterX=capture.jitterX;fd.jitterY=capture.jitterY;
-    fd.mvScaleX=-static_cast<float>(w);fd.mvScaleY=-static_cast<float>(h);
+    fd.mvScaleX=-static_cast<float>(w);fd.mvScaleY=frame_math::MotionVectorYScale(h,motionVectorYSign);
     fd.frameTimeMs=(std::max)(0.1f,api.Value<float>(method.time)*1000);
     fd.cameraNear=api.Value<float>(method.nearPlane,capture.camera.Get());
     fd.cameraFar=api.Value<float>(method.farPlane,capture.camera.Get());
@@ -584,6 +585,12 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
         return GAKU_E_UNAVAILABLE;
     dataPath=std::wstring(runtime.localRoot)+L"\\PluginData\\gakufsr4";
     auto config=std::wstring(runtime.localRoot)+L"\\Configs\\gakufsr4.ini";
+    motionVectorYSign=GetPrivateProfileIntW(L"FSR4",L"MotionVectorYSign",-1,config.c_str());
+    if(motionVectorYSign!=1&&motionVectorYSign!=-1) {
+        Log("MotionVectorYSign must be +1 or -1",GAKU_LOG_ERROR);
+        return GAKU_E_INVALID_ARGUMENT;
+    }
+    if(motionVectorYSign==1) Log("Experimental positive Y motion-vector scale enabled; compare against the default -1 sign",GAKU_LOG_WARNING);
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];
