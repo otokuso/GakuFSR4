@@ -31,6 +31,7 @@
 #include "../../src/FgViewportMath.h"
 #include "../../src/ExposurePolicy.h"
 #include "../../src/FgDropNotice.h"
+#include "../../src/FgCameraValidation.h"
 #include "../../src/NativeSwapchain.h"
 #include "../../src/PresentRate.h"
 #include "../../src/LiveTiming.h"
@@ -1189,6 +1190,13 @@ void main(uint3 id : SV_DispatchThreadID)
 	void FgPrepare(const FrameData& fd, ID3D12GraphicsCommandList* l, uint32_t keyW, uint32_t keyH)
 	{
 		g.fgRetry.ObserveScene(fd.displayW, fd.displayH, keyW, keyH);
+		if (fd.fg && !fg_camera::Valid(fd.cameraNear, fd.cameraFar, fd.fovV,
+			fd.camPos, fd.camUp, fd.camRight, fd.camFwd)) {
+			g_fgSkipReason = "Invalid camera parameters for FG";
+			g.fgPending = g.fgHavePrevious = false;
+			g.stats.fgSkipped++;
+			return;
+		}
 		if (!fd.fg || !g.fgDll || (!PresentHooked() && !nativePresent.chain) || g.fgUnavailable)
 		{
 			if (fd.fg && !PresentHooked()) g_fgSkipReason = "Waiting for a swap chain hook";

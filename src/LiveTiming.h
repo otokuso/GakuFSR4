@@ -89,7 +89,11 @@ public:
 
     void ObservePresent(uint64_t at, uint64_t frequency) {
         if (!at || !frequency) return;
-        if (lastPresent_ && at > lastPresent_) {
+        // Presents can return from different threads out of entry-time order.
+        // A late return from an older Present must not rewind the baseline or
+        // pair an input event with a frame that started before it arrived.
+        if (lastPresent_ && at <= lastPresent_) return;
+        if (lastPresent_) {
             const double gapMs = 1000.0 * static_cast<double>(at - lastPresent_) / frequency;
             if (gapMs <= 1000.0) presents_.Add(gapMs, at);
         }

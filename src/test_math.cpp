@@ -11,11 +11,14 @@
 #include "PresentHookSlots.h"
 #include "PresentHookRetry.h"
 #include "FgDropNotice.h"
+#include "FgCameraValidation.h"
 #include "TaaJitter.h"
 #include "Preset.h"
 #include "TestHalfFloat.h"
 #include "PrimaryCamera.h"
 #include <cassert>
+#include <climits>
+#include <limits>
 #include <mutex>
 #include <thread>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
@@ -76,6 +79,21 @@ int main() {
         timing.ObservePresent(150, hz);
         const auto input = timing.Snapshot(150, hz).input;
         assert(input.samples == 1 && input.medianMs == 20);
+    }
+    {
+        LiveTimingTracker timing;
+        constexpr uint64_t hz = 1000;
+        timing.ObservePresent(100, hz);
+        timing.ObserveInput(112);
+        timing.ObservePresent(120, hz);
+        timing.ObservePresent(110, hz); // old Present returned on another thread
+        timing.ObserveInput(128);
+        timing.ObservePresent(130, hz);
+        const auto summary = timing.Snapshot(130, hz);
+        assert(summary.present.samples == 2);
+        assert(summary.present.medianMs == 10 && summary.present.p95Ms == 20);
+        assert(summary.input.samples == 2);
+        assert(summary.input.medianMs == 2 && summary.input.p95Ms == 8);
     }
     {
         TimingSampleWindow<3> window;
@@ -352,4 +370,14 @@ int main() {
     assert(frame_math::Reset(1,1,4,1,45,45,a,a));
     assert(frame_math::Reset(1,1,2,1,45,45,a,b));
     assert(frame_math::Reset(1,1,2,1,51,45,a,a));
+    assert(frame_math::Reset(1,1,INT_MIN,INT_MAX,45,45,a,a));
+    assert(frame_math::Reset(1,1,2,1,std::numeric_limits<float>::quiet_NaN(),45,a,a));
+    const float invalidPos[]{std::numeric_limits<float>::infinity(),0,0};
+    assert(frame_math::Reset(1,1,2,1,45,45,invalidPos,a));
+    const float position[]{0,0,0}, up[]{0,1,0}, right[]{1,0,0}, forward[]{0,0,1};
+    assert(fg_camera::Valid(0.1f,1000,1,position,up,right,forward));
+    assert(!fg_camera::Valid(0.1f,1000,1,invalidPos,up,right,forward));
+    assert(!fg_camera::Valid(0.1f,1000,1,position,nullptr,right,forward));
+    assert(!fg_camera::Valid(0.1f,1000,0,position,up,right,forward));
+    assert(!fg_camera::Valid(0.1f,0.1f,1,position,up,right,forward));
 }

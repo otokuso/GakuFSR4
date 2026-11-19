@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 
 namespace frame_math {
@@ -61,8 +62,14 @@ inline float MotionVectorYScale(int renderHeight, int sign) {
 }
 inline bool Reset(int camera, int oldCamera, int frame, int oldFrame,
                   float fov, float oldFov, const float* pos, const float* oldPos) {
+    if (!std::isfinite(fov) || !std::isfinite(oldFov)) return true;
     float distance = 0;
-    for (int i = 0; i < 3; ++i) distance += (pos[i]-oldPos[i])*(pos[i]-oldPos[i]);
-    return camera != oldCamera || frame != oldFrame + 1 || distance > 25.0f || std::abs(fov-oldFov) > 5;
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(pos[i]) || !std::isfinite(oldPos[i])) return true;
+        distance += (pos[i]-oldPos[i])*(pos[i]-oldPos[i]);
+    }
+    // The frame counter is a signed int in Unity; oldFrame + 1 can overflow.
+    return camera != oldCamera || int64_t{frame} != int64_t{oldFrame} + 1 ||
+        distance > 25.0f || std::abs(fov-oldFov) > 5;
 }
 }
