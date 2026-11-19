@@ -6,6 +6,7 @@
 #include "Preset.h"
 #include "BridgeStats.h"
 #include "PresentRate.h"
+#include "LiveTiming.h"
 #include "SettingsUi.h"
 
 extern "C" void FSR4_GetStats(Stats* out);
@@ -23,6 +24,8 @@ int draftSharpness=20;
 const char* saveMessage=nullptr;
 Stats currentStats{};
 ULONGLONG lastStatsRead=0;
+ULONGLONG lastTimingRead=0;
+LiveTimingSummary currentTiming{};
 
 bool Save() {
     wchar_t sharpness[16]{};
@@ -63,6 +66,32 @@ void DrawSettings(void*) {
         ImGui::Text("Game FPS: %.1f  |  Present FPS (incl. FG): %.1f",fps.realFps,fps.totalFps);
     else
         ImGui::TextUnformatted("Game FPS: --  |  Present FPS (incl. FG): --");
+    // Rolling window of real application Presents, including both manual and
+    // native FG paths. Generated frames never enter these samples.
+    const ULONGLONG timingNow=GetTickCount64();
+    if(!lastTimingRead || timingNow-lastTimingRead>=2000) {
+        currentTiming=ReadLiveTiming();
+        lastTimingRead=timingNow;
+    }
+    if(ImGui::CollapsingHeader("Live frame pacing / input timing",ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& p=currentTiming.present;
+        if(p.samples)
+            ImGui::Text("Game Present gap: median %.2f / p95 %.2f / p99 %.2f ms",p.medianMs,p.p95Ms,p.p99Ms);
+        else
+            ImGui::TextUnformatted("Game Present gap: -- (waiting for frames)");
+        if(p.samples) ImGui::Text("Pacing jitter (stddev): %.2f ms  |  n=%zu",p.stddevMs,p.samples);
+        const auto& input=currentTiming.input;
+        if(input.samples)
+            ImGui::Text("Input event -> Present start: median %.2f / p95 %.2f ms (n=%zu)",
+                input.medianMs,input.p95Ms,input.samples);
+        else if(currentTiming.inputHookActive)
+            ImGui::TextUnformatted("Input event -> Present start: -- (press a key / move mouse)");
+        else
+            ImGui::TextUnformatted("Input event -> Present start: -- (game input hook unavailable)");
+        ImGui::TextDisabled("App-side estimates, last 10 s; real game frames only.");
+        ImGui::TextWrapped("Not display-frame pacing or full input-to-screen latency. "
+            "For displayed frames and input-to-photon estimates, capture with PresentMon.");
+    }
     ImGui::Checkbox("Enable FSR 4",&draftEnabled);
     ImGui::Checkbox("Frame Generation (2x)",&draftFrameGeneration);
     if(ImGui::BeginCombo("Preset",draftPreset<0?"Custom ratio":FsrPresets[draftPreset].label)) {

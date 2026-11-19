@@ -1,5 +1,6 @@
 #include "FrameMath.h"
 #include "PresentRate.h"
+#include "LiveTiming.h"
 #include "RenderWorkQueue.h"
 #include "FsrProvider.h"
 #include "FgErrorBurst.h"
@@ -41,6 +42,44 @@ static_assert(frame_math::FsrInputIsHdr(true,true,false));
 static_assert(!frame_math::FsrInputIsHdr(true,false,false));
 static_assert(!frame_math::FsrInputIsHdr(false,false,true));
 int main() {
+    {
+        LiveTimingTracker timing;
+        constexpr uint64_t hz=1000000;
+        timing.ObservePresent(1000000,hz);
+        timing.ObserveInput(1002000);
+        timing.ObservePresent(1010000,hz);
+        const auto first=timing.Snapshot(1010000,hz);
+        assert(first.present.samples==1 && first.present.medianMs==10);
+        assert(first.input.samples==1 && first.input.medianMs==8);
+        timing.ObservePresent(1020000,hz);
+        assert(timing.Snapshot(1020000,hz).input.samples==1); // one event, one Present
+        timing.ObserveInput(1022000);
+        timing.ObserveInput(1025000); // the latest consumed input event wins
+        timing.ObservePresent(1030000,hz);
+        const auto next=timing.Snapshot(1030000,hz);
+        assert(next.present.samples==3 && next.present.p99Ms==10 && next.present.stddevMs==0);
+        assert(next.input.samples==2 && next.input.medianMs==5 && next.input.p95Ms==8);
+        timing.ObserveInput(1032000);
+        timing.ObservePresent(2100000,hz); // a long hitch is not a pacing sample or stale input sample
+        assert(timing.Snapshot(2100000,hz).present.samples==3);
+        assert(timing.Snapshot(2100000,hz).input.samples==2);
+        assert(timing.Snapshot(13000000,hz).present.samples==0);
+        assert(timing.Snapshot(13000000,hz).input.samples==0);
+        timing.Reset();
+        assert(timing.Snapshot(1030000,hz).present.samples==0);
+    }
+    {
+        TimingSampleWindow<3> window;
+        for(uint64_t i=1;i<=4;++i) window.Add(static_cast<double>(i),i*1000);
+        const auto samples=window.Snapshot(4000,1000);
+        assert(samples.samples==3 && samples.medianMs==3 && samples.p95Ms==4 && samples.p99Ms==4);
+        assert(window.Snapshot(15000,1000).samples==0); // samples expire after ten seconds
+        TimingSampleWindow<100> percentiles;
+        for(uint64_t i=1;i<=100;++i) percentiles.Add(static_cast<double>(i),1000+i);
+        const auto distribution=percentiles.Snapshot(1200,1000);
+        assert(distribution.samples==100 && distribution.medianMs==50);
+        assert(distribution.p95Ms==95 && distribution.p99Ms==99);
+    }
     PresentRate fps;
     fps.Sample(100,{0,0});
     assert(!fps.ready);

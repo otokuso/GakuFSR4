@@ -33,6 +33,7 @@
 #include "../../src/FgDropNotice.h"
 #include "../../src/NativeSwapchain.h"
 #include "../../src/PresentRate.h"
+#include "../../src/LiveTiming.h"
 #include <timeapi.h>
 
 using Microsoft::WRL::ComPtr;
@@ -1602,6 +1603,8 @@ HRESULT ResizeNativeSwapchain(NativeSwapchainState& state, UINT count, UINT widt
 HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* source, UINT sync, UINT flags,
 	const DXGI_PRESENT_PARAMETERS* parameters)
 {
+	LARGE_INTEGER appEntry{};
+	QueryPerformanceCounter(&appEntry);
 	std::lock_guard<std::mutex> lock(g_renderLock);
 	const auto present = [&] {
 		return parameters ? state.swapchain->Present1(sync, flags, parameters) : state.swapchain->Present(sync, flags);
@@ -1689,6 +1692,7 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	if (SUCCEEDED(hr)) {
 		if (hr == S_OK) {
 			CountPresentFrames(1, frames);
+			RecordGamePresentQpc(static_cast<uint64_t>(appEntry.QuadPart));
 			if (nativePresent.enabled) ObserveFgInterval(entry.QuadPart, frequency.QuadPart);
 		}
 		if (frames) {

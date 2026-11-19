@@ -1,5 +1,18 @@
 # Reproducible FSR / FG performance comparisons
 
+## Live readout in GakuLoader (F1)
+
+Open F1 → `GakuFSR4` → **Live frame pacing / input timing**. The panel updates about every two seconds and reports samples from the most recent ten seconds:
+
+| UI field | What is actually measured |
+| --- | --- |
+| `Game Present gap` median/p95/p99 | The time between **successful real-game Present call entries** (manual and native FG paths). It excludes generated-frame display events. |
+| `Pacing jitter (stddev)` | Standard deviation of those real-game Present intervals. This is CPU submission-side jitter, not displayed-frame jitter. |
+| `Input event -> Present start` median/p95 | Elapsed CPU time from the **latest keyboard/mouse message removed from the Unity window's message queue** to the **next successful real-game Present call entry**, matched at most once per input event. This is only a *partial* input latency. |
+| `n` | Number of observations in the corresponding rolling window. No observations are shown as `--`, never as zero latency. |
+
+Input monitoring uses a `WH_GETMESSAGE` hook restricted to the Unity window's thread and process. It reads message types and timestamps only, not key codes, mouse coordinates, or user-entered text. Games that bypass this message queue can show `--` even when input works. Continuous mouse movement can shorten the input-to-Present value because the newest message is used. A hitch over one second is omitted from the rolling gap samples, and samples expire after ten seconds. The CPU-side timing is not measured display cadence, GPU/display queue latency, or physical click-to-photon latency; the CSV/PresentMon workflow below remains necessary for those comparisons.
+
 Use an independent frame presentation capture tool and keep a copy of each raw capture. The bridge's FSR/FG GPU time and VRAM counters do **not** include all D3D11↔D3D12 copies, fences, waits and frame presentation, so FPS must be measured separately. The `Runtime diagnostics` UI panel (PR #34) can be used for bridge-side statistics once integrated.
 
 Test the same game build, live scene, camera, GPU driver, display, temperature/power profile and sampling duration. Run separate captures for:

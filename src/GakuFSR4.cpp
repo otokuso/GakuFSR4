@@ -829,6 +829,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    StopGameInputHook();
     renderWork.CancelPackets();
     FSR4_StopFrameGenerationTimer();
     primaryCamera.Reset();
