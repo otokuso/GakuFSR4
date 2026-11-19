@@ -4,14 +4,17 @@
 
 struct TaaMatrixOffset { float x, y; };
 
+// NativeAA defaults to the FSR 1:1 sequence (8 phases). Upscaling presets
+// retain the original Unity 1024-phase behavior unless explicitly overridden.
+constexpr int DefaultJitterPhaseMode = 2;
+
 inline int FsrRecommendedJitterPhases(float ratio)
 {
     return std::isfinite(ratio) && ratio>=1 && ratio<=3 ? static_cast<int>(std::round(8*ratio*ratio)) : 8;
 }
 
-// 0: preserve Unity's 1024-frame Halton sequence, 1: FSR's ratio-dependent
-// sequence, 2: use the FSR sequence for NativeAA only. The last option keeps
-// the existing upscaling behavior while making 1:1 AA easier to compare.
+// 0: Unity 1024-frame Halton sequence (legacy), 1: FSR ratio-dependent sequence,
+// 2: FSR sequence for NativeAA only (default).
 inline int SelectJitterPhaseCount(int mode, float ratio)
 {
     return mode == 1 || (mode == 2 && ratio == 1.0f)

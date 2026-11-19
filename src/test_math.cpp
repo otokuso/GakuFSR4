@@ -298,6 +298,9 @@ int main() {
     assert(camera.Allow(11,14));
     assert(FsrRecommendedJitterPhases(1.5f)==18);
     assert(FsrRecommendedJitterPhases(1.0f)==8);
+    assert(DefaultJitterPhaseMode==2);
+    assert(SelectJitterPhaseCount(DefaultJitterPhaseMode,1.0f)==8);
+    assert(SelectJitterPhaseCount(DefaultJitterPhaseMode,1.5f)==1024);
     assert(FsrRecommendedJitterPhases(1.7f)==23);
     assert(FsrRecommendedJitterPhases(2.0f)==32);
     assert(FsrRecommendedJitterPhases(3.0f)==72);

@@ -4,6 +4,9 @@
 #include <cmath>
 
 int main() {
+    assert(DefaultJitterPhaseMode==2);
+    assert(SelectJitterPhaseCount(DefaultJitterPhaseMode,1.0f)==8);
+    assert(SelectJitterPhaseCount(DefaultJitterPhaseMode,1.5f)==1024);
     assert(frame_math::EarlyNativeAA(false,1.0f));
     assert(!frame_math::EarlyNativeAA(true,1.0f));
     assert(!frame_math::EarlyNativeAA(false,1.5f));

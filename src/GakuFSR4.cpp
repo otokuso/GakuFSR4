@@ -27,7 +27,7 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool attempted=false;
 bool frameGeneration=false;
-int jitterPhaseMode=0;
+int jitterPhaseMode=DefaultJitterPhaseMode;
 int motionVectorYSign=-1;
 int jitterXSign=-1,jitterYSign=-1;
 float ratio=1.5f, sharpness=0.2f;
@@ -789,10 +789,10 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     }
     if(jitterXSign!= -1||jitterYSign!=-1)
         Log("Experimental FSR jitter sign override enabled; compare against default -1/-1",GAKU_LOG_WARNING);
-    jitterPhaseMode=GetPrivateProfileIntW(L"FSR4",L"JitterPhaseMode",0,config.c_str());
+    jitterPhaseMode=GetPrivateProfileIntW(L"FSR4",L"JitterPhaseMode",DefaultJitterPhaseMode,config.c_str());
     if(jitterPhaseMode<0 || jitterPhaseMode>2) {
-        Log("Invalid JitterPhaseMode; using the normal Unity jitter cycle",GAKU_LOG_WARNING);
-        jitterPhaseMode=0;
+        Log("Invalid JitterPhaseMode; using Native AA FSR phases and Unity phases for upscaling",GAKU_LOG_WARNING);
+        jitterPhaseMode=DefaultJitterPhaseMode;
     }
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;

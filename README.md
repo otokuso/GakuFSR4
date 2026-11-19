@@ -96,7 +96,7 @@ F1メニューのGakuFSR4パネルでは、次の操作ができます。
 | `Preset` | 内部描画解像度のプリセット |
 | `Sharpness` | シャープネス（0～100%） |
 | `Frame Generation (2x)` | FGを有効にする（対応シーンのみ） |
-| `Native AA / jitter (experimental)` | Native AAの実行位置とジッター周期を変更。初期値は従来どおり |
+| `Native AA / jitter (experimental)` | Native AAのジッター周期を変更。既定値はFSR推奨の8周期 |
 | `Save settings` | `gakufsr4.ini` へ設定を保存 |
 
 **保存した設定は、ゲームの次回起動時に反映されます。** Native AAの履歴を手動リセットするボタンだけは、実行中に次のFSRフレームへ反映されます。その他の実験設定はINIを直接編集してください。
@@ -123,7 +123,7 @@ Enabled=1
 Preset=Quality
 Sharpness=0.2
 FrameGeneration=0
-JitterPhaseMode=0
+JitterPhaseMode=2
 NativeSwapChain=0
 ```
 
@@ -132,7 +132,7 @@ NativeSwapChain=0
 - `FrameGeneration=1` でFGを試します。初期値は `0` です。
 - `NativeSwapChain=1` は**実験的なAMD公式SwapChain方式**を有効にします。`FrameGeneration=1` も必要です。
 - Native AAの画面カメラは、UnityのTAAパスでFSRを実行します。旧設定 `NativeAABeforePost` は無視されます。
-- `JitterPhaseMode=0` はUnityの1024周期（従来どおり）、`1` はFSR推奨周期（Native AAでは8）、`2` はNative AAだけFSR推奨周期を使用します。いずれも検証用です。
+- `JitterPhaseMode=2` **（新しい既定値）** はNative AAだけFSR推奨の8周期にし、Quality以上は従来のUnity 1024周期を維持します。`0` はすべてUnity 1024周期（旧設定）、`1` はすべてFSR推奨周期です。既存のINIに `JitterPhaseMode=0` が書かれている場合は自動変更されないため、8周期を使うには `2` に変更してください。
 - `ProviderVersion=4.1.2` のように指定すると、使うFSR 4.xプロバイダーのバージョンを固定できます。指定版が見つからない場合はFSRを開始しません。省略時は利用可能な4.xのうち最新のバージョンを選びます。**FSR 3への自動切り替えはありません。**
 - 旧設定 `Ratio` は `Preset` が未指定の場合だけ使われます。不明なプリセット名は `Quality` として扱われます。
 
