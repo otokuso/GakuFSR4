@@ -17,9 +17,12 @@ cmake --build build --config Release --target test_native_swapchain
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --borderless
+.\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --borderless --on12
 ```
 
 The test submits 480 source frames at a target of 60 FPS. `--borderless` uses the monitor containing the cursor, with a native-size backbuffer and the DXGI tearing flag. Run PresentMon 2.x with `--process_name test_native_swapchain.exe --track_frame_type` before launching the test. With SDK 2.4.0, PresentMon labels the AMD generated frames `Unknown`. Check the display intervals and compare frame-type counts with FG off. The synthetic motion and depth make this a presentation test. It requires AMD hardware for the AMD FG provider.
+
+`--on12` renders directly to D3D11On12 wrappers around the AMD SwapChain backbuffers. The D3D11 immediate context flushes to the same D3D12 queue before the SDK prepares and presents each frame. This path eliminates the shared-colour copy and the cross-device fence wait from the test. Both paths retain the per-frame completion fence for allocator reuse.
 
 ## Game integration
 
@@ -42,4 +45,15 @@ On an RX 9070 XT with Adrenalin 26.11.1 (32.0.32015.16001), Windows 11 build 263
 
 All rows used Composed Flip. The borderless run requested tearing with VSync off, but PresentMon reported `AllowsTearing=0`. A repeat with the borderless window promoted to topmost showed the same mode and flag at 119.96 displayed FPS. This confirms display of interpolated frames. Driver-assisted pacing and VRR operation still need confirmation on a qualifying display path.
 
-References: [AMD SwapChain integration and DAFP prerequisites](https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-swap-chain/) · [DXGI flip-model swapchain creation](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforhwnd)
+## D3D11On12 comparison
+
+The same Radeon system ran both colour paths at 3840×2160 borderless with FG enabled and SyncInterval 0. Both dispatched 480 interpolated frames and showed 390 application and 390 AMD-generated display intervals in the middle 6.5 seconds. Both traces reported `Hardware: Independent Flip` and `AllowsTearing=1` for all those intervals.
+
+| Colour path | Display FPS | p99 display interval | Process CPU time | Peak sampled dedicated VRAM |
+| --- | ---: | ---: | ---: | ---: |
+| Native D3D11, shared texture | 120.04 | 22.08 ms | 1.48 s | 573.6 MiB |
+| D3D11On12, wrapped backbuffers | 119.98 | 22.26 ms | 0.97 s | 559.2 MiB |
+
+Each row is a single eight-second synthetic run. CPU time is for the whole process. VRAM is the maximum of the per-process dedicated usage sampled about once per second. The run confirms independent presentation with tearing allowed. It provides no direct measurement of the active AMD pacing mechanism or the monitor's VRR refresh. The existing manual game path and input-to-display latency still need a matched comparison. D3D11On12 compatibility with Unity's full renderer also remains open.
+
+References: [AMD SwapChain integration and DAFP prerequisites](https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-swap-chain/) · [DXGI flip-model swapchain creation](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforhwnd) · [Direct3D 11 on 12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-11-on-12)
