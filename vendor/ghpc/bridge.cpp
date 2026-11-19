@@ -240,6 +240,8 @@ namespace
 		bool fgProvidersListed = false;
 		bool fgUnavailable = false;
 		ImageRect fgContent{};
+		bool fgViewportOverrideEnabled = false;
+		ImageRect fgViewportOverride{};
 		UINT fgSceneW = 0, fgSceneH = 0;
 		Shared present, gen, fgColor, fgOutput;
 		ComPtr<ID3D12RootSignature> scaleRs;
@@ -1291,7 +1293,19 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 		g.fgContent = {};
 		return false;
 	}
-	const ImageRect content = FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
+	const ImageRect content = g.fgViewportOverrideEnabled ? g.fgViewportOverride :
+		FitScene(bd.Width, bd.Height, g.fgSceneW, g.fgSceneH);
+	if (g.fgViewportOverrideEnabled && !FgViewportWithinBackbuffer(content, bd.Width, bd.Height, g.fgSceneW, g.fgSceneH)) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			Log("FG viewport override %u,%u %ux%u is outside the %ux%u backbuffer or mismatches the %ux%u scene; skipping FG.",
+				content.x,content.y,content.width,content.height,bd.Width,bd.Height,g.fgSceneW,g.fgSceneH);
+		}
+		g.stats.fgSkipped++;
+		g.fgHavePrevious = false;
+		return false;
+	}
 	const ImageRect previous = g.fgContent;
 	const bool letterboxed = content.width != bd.Width || content.height != bd.Height;
 	const bool scaled = letterboxed || bd.Width != g.fgDisplayW || bd.Height != g.fgDisplayH;
@@ -1488,6 +1502,12 @@ EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 	}
 	timeBeginPeriod(1);
 	return 1;
+}
+
+EXPORT void FSR4_SetFgViewportOverride(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+{
+	g.fgViewportOverride = {x,y,width,height};
+	g.fgViewportOverrideEnabled = width && height;
 }
 
 EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
