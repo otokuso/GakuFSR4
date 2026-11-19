@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "PrimaryCamera.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -205,6 +206,7 @@ struct History {
 std::atomic<uint64_t> submitted{0}, completed{0};
 int configuredFrame=-1;
 std::vector<int> configuredCameras;
+PrimaryCamera primaryCamera;
 
 void BlitCamera(P cmd,P src,P dst) {
     float mip=0; bool bilinear=false;
@@ -265,6 +267,7 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         const bool offscreen=At<P>(cd,field.target)!=nullptr;
         int w=frame_math::RenderSize(dw,ratio),h=frame_math::RenderSize(dh,ratio);
         int frame=api.Value<int>(method.frame),id=api.Value<int>(method.id,camera);
+        if (!primaryCamera.Allow(id,frame)) return;
         if(frame!=configuredFrame) { configuredFrame=frame;configuredCameras.clear(); }
         if(configuredCameras.size()>=32) return;
         configuredCameras.push_back(id);
@@ -630,6 +633,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    primaryCamera.Reset();
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {
