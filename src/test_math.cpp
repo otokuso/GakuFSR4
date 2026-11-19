@@ -17,6 +17,16 @@ static_assert(!frame_math::RetryCamera(4,4,29,30));
 static_assert(frame_math::RetryCamera(4,4,30,30));
 static_assert(frame_math::RetryCamera(5,4,29,30));
 int main() {
+    float prevForward[3]{0,0,1};
+    float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
+    float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
+    float reverseForward[3]{0,0,-1};
+    float zeroForward[3]{};
+    assert(!frame_math::RotationJump(prevForward,prevForward));
+    assert(!frame_math::RotationJump(smoothForward,prevForward));
+    assert(frame_math::RotationJump(jumpForward,prevForward));
+    assert(frame_math::RotationJump(reverseForward,prevForward));
+    assert(frame_math::RotationJump(prevForward,zeroForward));
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);
