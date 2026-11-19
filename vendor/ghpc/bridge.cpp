@@ -1460,7 +1460,12 @@ bool FgPresentInner(IDXGISwapChain* sc, UINT sync, UINT flags, PresentCall origi
 	{
 		g.ctx->CopyResource(bb2.Get(), g.present.t11.Get());
 		*hr = original(sc, realSync, pairFlags, parameters);
-		g.stats.fgReal++;
+		if (SUCCEEDED(*hr)) g.stats.fgReal++;
+		else
+		{
+			g.fgHavePrevious = false;
+			Log("FG real frame Present failed: 0x%08X.", (unsigned)*hr);
+		}
 	}
 	else *hr = DXGI_ERROR_INVALID_CALL;
 	LARGE_INTEGER t3;
