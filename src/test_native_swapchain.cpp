@@ -1,12 +1,14 @@
-// Standalone proof of concept: a D3D11-rendered texture is shared with D3D12,
-// copied to an AMD FSR FG SwapChain and presented in a separate test window.
+// Standalone proof of concept: render through D3D11 into an AMD FSR FG SwapChain,
+// using either a shared texture or D3D11On12 wrapped backbuffers.
 // It does not replace or intercept Unity's D3D11 swap chain.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <d3d11on12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -52,6 +54,7 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURC
 }
 
 static constexpr UINT frameCount = 480;
+static constexpr UINT bufferCount = 2;
 
 // The test uses flat depth and static vectors to validate the dispatch and presentation path.
 static ComPtr<ID3D12Resource> MakeInput(ID3D12Device* device, ID3D12GraphicsCommandList* list,
@@ -123,15 +126,16 @@ struct Interpolation {
 int wmain(int argc, wchar_t** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    bool enableFg = false, borderless = false;
+    bool enableFg = false, borderless = false, useOn12 = false;
     for (int i = 2; i < argc; ++i) {
         const std::wstring option = argv[i];
         if (option == L"--fg" && !enableFg) enableFg = true;
         else if (option == L"--borderless" && !borderless) borderless = true;
+        else if (option == L"--on12" && !useOn12) useOn12 = true;
         else return 2;
     }
     if (argc < 2) {
-        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory> [--fg] [--borderless]");
+        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory> [--fg] [--borderless] [--on12]");
         return 2;
     }
     std::wstring directory = argv[1];
@@ -168,14 +172,18 @@ int wmain(int argc, wchar_t** argv)
             break;
         }
         if (!d11 || !d12) throw std::runtime_error("No D3D11/D3D12 compatible hardware adapter");
-        ComPtr<ID3D11Device5> d11v5;
-        ComPtr<ID3D11DeviceContext4> ctx;
-        Check(d11.As(&d11v5), "ID3D11Device5");
-        Check(immediate.As(&ctx), "ID3D11DeviceContext4");
-
         D3D12_COMMAND_QUEUE_DESC queueDesc{};
         ComPtr<ID3D12CommandQueue> queue;
         Check(d12->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue)), "CreateCommandQueue");
+        ComPtr<ID3D11On12Device> on12;
+        if (useOn12) {
+            IUnknown* queues[]{queue.Get()};
+            Check(D3D11On12CreateDevice(d12.Get(), 0, nullptr, 0, queues, 1, 0,
+                d11.ReleaseAndGetAddressOf(), immediate.ReleaseAndGetAddressOf(), nullptr), "D3D11On12CreateDevice");
+            Check(d11.As(&on12), "ID3D11On12Device");
+        }
+        ComPtr<ID3D11DeviceContext4> ctx;
+        Check(immediate.As(&ctx), "ID3D11DeviceContext4");
 
         WNDCLASSW wc{};
         wc.lpfnWndProc = DefWindowProcW;
@@ -226,7 +234,7 @@ int wmain(int argc, wchar_t** argv)
         swapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         swapDesc.SampleDesc.Count = 1;
         swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.BufferCount = 2;
+        swapDesc.BufferCount = bufferCount;
         swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         swapDesc.Flags = swapFlags;
         ffxCreateContextDescFrameGenerationSwapChainVersionDX12 version{};
@@ -254,38 +262,59 @@ int wmain(int argc, wchar_t** argv)
         printf("AMD native D3D12 FG SwapChain: %ux%u, %s, FG %s, SyncInterval 0, tearing %s.\n",
             width, height, borderless ? "borderless" : "windowed", enableFg ? "on" : "off",
             presentFlags ? "allowed" : "disabled");
+        puts(useOn12 ? "Colour path: D3D11On12 wrapped backbuffers." : "Colour path: shared native D3D11 texture.");
 
-        D3D11_TEXTURE2D_DESC textureDesc{};
-        textureDesc.Width = width;
-        textureDesc.Height = height;
-        textureDesc.MipLevels = textureDesc.ArraySize = 1;
-        textureDesc.SampleDesc.Count = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        textureDesc.Usage = D3D11_USAGE_DEFAULT;
-        textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-        ComPtr<ID3D11Texture2D> input11;
-        Check(d11->CreateTexture2D(&textureDesc, nullptr, &input11), "D3D11 CreateTexture2D");
         ComPtr<ID3D11RenderTargetView> target;
-        Check(d11->CreateRenderTargetView(input11.Get(), nullptr, &target), "CreateRenderTargetView");
-        ComPtr<IDXGIResource1> dxgiResource;
-        Check(input11.As(&dxgiResource), "IDXGIResource1");
-        HANDLE textureHandle = nullptr;
-        Check(dxgiResource->CreateSharedHandle(nullptr,
-            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &textureHandle), "CreateSharedHandle");
         ComPtr<ID3D12Resource> input12;
-        const HRESULT openResult = d12->OpenSharedHandle(textureHandle, IID_PPV_ARGS(&input12));
-        CloseHandle(textureHandle);
-        Check(openResult, "D3D12 OpenSharedHandle");
-
         ComPtr<ID3D11Fence> fence11;
-        Check(d11v5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence11)), "D3D11 CreateFence");
-        HANDLE fenceHandle = nullptr;
-        Check(fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Fence CreateSharedHandle");
         ComPtr<ID3D12Fence> fence12;
-        const HRESULT fenceOpenResult = d12->OpenSharedHandle(fenceHandle, IID_PPV_ARGS(&fence12));
-        CloseHandle(fenceHandle);
-        Check(fenceOpenResult, "D3D12 OpenSharedFence");
+        struct WrappedBuffer {
+            ComPtr<ID3D11Resource> resource;
+            ComPtr<ID3D11RenderTargetView> target;
+        };
+        std::array<WrappedBuffer, bufferCount> wrapped;
+        if (useOn12) {
+            const D3D11_RESOURCE_FLAGS flags{D3D11_BIND_RENDER_TARGET};
+            for (UINT i = 0; i < swapDesc.BufferCount; ++i) {
+                ComPtr<ID3D12Resource> buffer;
+                Check(swapchain->GetBuffer(i, IID_PPV_ARGS(&buffer)), "Get AMD backbuffer for D3D11On12");
+                Check(on12->CreateWrappedResource(buffer.Get(), &flags, D3D12_RESOURCE_STATE_PRESENT,
+                    D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&wrapped[i].resource)), "Wrap AMD backbuffer");
+                Check(d11->CreateRenderTargetView(wrapped[i].resource.Get(), nullptr, &wrapped[i].target),
+                    "Create wrapped backbuffer RTV");
+            }
+            Check(d12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence12)), "Create D3D12 frame fence");
+        } else {
+            D3D11_TEXTURE2D_DESC textureDesc{};
+            textureDesc.Width = width;
+            textureDesc.Height = height;
+            textureDesc.MipLevels = textureDesc.ArraySize = 1;
+            textureDesc.SampleDesc.Count = 1;
+            textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            textureDesc.Usage = D3D11_USAGE_DEFAULT;
+            textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+            ComPtr<ID3D11Texture2D> input11;
+            Check(d11->CreateTexture2D(&textureDesc, nullptr, &input11), "D3D11 CreateTexture2D");
+            Check(d11->CreateRenderTargetView(input11.Get(), nullptr, &target), "CreateRenderTargetView");
+            ComPtr<IDXGIResource1> dxgiResource;
+            Check(input11.As(&dxgiResource), "IDXGIResource1");
+            HANDLE textureHandle = nullptr;
+            Check(dxgiResource->CreateSharedHandle(nullptr,
+                DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &textureHandle), "CreateSharedHandle");
+            const HRESULT openResult = d12->OpenSharedHandle(textureHandle, IID_PPV_ARGS(&input12));
+            CloseHandle(textureHandle);
+            Check(openResult, "D3D12 OpenSharedHandle");
+
+            ComPtr<ID3D11Device5> d11v5;
+            Check(d11.As(&d11v5), "ID3D11Device5");
+            Check(d11v5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence11)), "D3D11 CreateFence");
+            HANDLE fenceHandle = nullptr;
+            Check(fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Fence CreateSharedHandle");
+            const HRESULT fenceOpenResult = d12->OpenSharedHandle(fenceHandle, IID_PPV_ARGS(&fence12));
+            CloseHandle(fenceHandle);
+            Check(fenceOpenResult, "D3D12 OpenSharedFence");
+        }
         std::unique_ptr<void, decltype(&CloseHandle)> fenceEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr), CloseHandle);
         if (!fenceEvent) throw std::runtime_error("Could not create GPU fence event");
         ComPtr<ID3D12CommandAllocator> allocator;
@@ -345,24 +374,36 @@ int wmain(int argc, wchar_t** argv)
             const auto left = static_cast<LONG>(frame * (width / 160) % (width - boxWidth));
             const D3D11_RECT rect{left, static_cast<LONG>(height * 2 / 5), left + boxWidth,
                 static_cast<LONG>(height * 3 / 5)};
-            ctx->ClearRenderTargetView(target.Get(), background);
-            ctx->ClearView(target.Get(), green, &rect, 1);
+            const UINT index = swapchain->GetCurrentBackBufferIndex();
+            const auto draw = [&](ID3D11RenderTargetView* view) {
+                ctx->ClearRenderTargetView(view, background);
+                ctx->ClearView(view, green, &rect, 1);
+            };
             const uint64_t ready = 2ull * frame + 1;
-            Check(ctx->Signal(fence11.Get(), ready), "D3D11 Signal");
-            ctx->Flush();
-            Check(queue->Wait(fence12.Get(), ready), "D3D12 queue Wait");
+            if (useOn12) {
+                auto* buffer = wrapped.at(index).resource.Get();
+                on12->AcquireWrappedResources(&buffer, 1);
+                draw(wrapped[index].target.Get());
+                on12->ReleaseWrappedResources(&buffer, 1);
+                ctx->Flush();
+            } else {
+                draw(target.Get());
+                Check(ctx->Signal(fence11.Get(), ready), "D3D11 Signal");
+                ctx->Flush();
+                Check(queue->Wait(fence12.Get(), ready), "D3D12 queue Wait");
 
-            ComPtr<ID3D12Resource> backbuffer;
-            Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)), "GetBuffer");
-            const D3D12_RESOURCE_BARRIER before[]{
-                Transition(input12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST)};
-            list->ResourceBarrier(2, before);
-            list->CopyResource(backbuffer.Get(), input12.Get());
-            const D3D12_RESOURCE_BARRIER after[]{
-                Transition(input12.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
-                Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT)};
-            list->ResourceBarrier(2, after);
+                ComPtr<ID3D12Resource> backbuffer;
+                Check(swapchain->GetBuffer(index, IID_PPV_ARGS(&backbuffer)), "GetBuffer");
+                const D3D12_RESOURCE_BARRIER before[]{
+                    Transition(input12.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST)};
+                list->ResourceBarrier(2, before);
+                list->CopyResource(backbuffer.Get(), input12.Get());
+                const D3D12_RESOURCE_BARRIER after[]{
+                    Transition(input12.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                    Transition(backbuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT)};
+                list->ResourceBarrier(2, after);
+            }
             if (enableFg) {
                 fg.Configure(frame + 1);
                 ffxDispatchDescFrameGenerationPrepareV2 prepare{};
@@ -393,6 +434,13 @@ int wmain(int argc, wchar_t** argv)
             Check(present, "AMD FG SwapChain Present");
         }
         CheckFx(fg.Drain(), "Drain native FG");
+        if (useOn12) {
+            for (auto& buffer : wrapped) {
+                buffer.target.Reset();
+                buffer.resource.Reset();
+            }
+            ctx->Flush();
+        }
         CheckFx(fg.failure.load(), "Native FG callback");
         if (enableFg && fg.generated == 0) throw std::runtime_error("No native FG output was dispatched");
         printf("PASS: %u D3D11 frames presented through the AMD native SwapChain, %u interpolated frames dispatched.\n",
