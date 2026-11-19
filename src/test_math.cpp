@@ -1,6 +1,11 @@
 #include "FrameMath.h"
 #include "FsrProvider.h"
+#include "FgErrorBurst.h"
+#include "FgRetry.h"
+#include "MipBias.h"
+#include "FgViewportMath.h"
 #include "Preset.h"
+#include "TestHalfFloat.h"
 #include <cassert>
 static_assert(frame_math::SceneCamera(true,true,true,false,false));
 static_assert(!frame_math::SceneCamera(true,true,false,false,false));
@@ -26,6 +31,68 @@ int main() {
     assert(NewerFsr4Provider(ParseFsrProviderVersion("4.10.0"),ParseFsrProviderVersion("4.9.99")));
     assert(!NewerFsr4Provider(ParseFsrProviderVersion("3.99.99"),{}));
     assert(!NewerFsr4Provider(ParseFsrProviderVersion("4.1.1"),ParseFsrProviderVersion("4.1.2")));
+    FgRetry retry;
+    retry.ObserveScene(1920,1080,1280,720);
+    assert(retry.Ready(0));
+    for (uint32_t n=1; n<=FgRetry::MaxFailures; ++n) {
+        uint32_t delay=retry.Failed(1000, false);
+        assert(delay==(n==FgRetry::MaxFailures ? 0u : (500u << (n-1))));
+        assert(!retry.Ready(1000+delay-1));
+        if (n<FgRetry::MaxFailures) assert(retry.Ready(1000+delay));
+    }
+    assert(!retry.Ready(1000000)); // bounded retries
+    retry.ObserveBackbuffer(1920,1080);
+    assert(!retry.Ready(1000000)); // first observation only sets the baseline
+    retry.ObserveBackbuffer(1600,900); // resize re-enables the FG path
+    assert(retry.Ready(1000000));
+    retry.Failed(1000000, true); // unsupported provider is permanent for the device
+    retry.ObserveScene(1080,1920,720,1280);
+    assert(!retry.Ready(2000000));
+    retry.NewDevice();
+    assert(retry.Ready(0));
+    float prevForward[3]{0,0,1};
+    float smoothForward[3]{0.173648f,0,0.984808f}; // 10-degree pan
+    float jumpForward[3]{0.866025f,0,0.5f}; // 60-degree cut
+    float reverseForward[3]{0,0,-1};
+    float zeroForward[3]{};
+    assert(!frame_math::RotationJump(prevForward,prevForward));
+    assert(!frame_math::RotationJump(smoothForward,prevForward));
+    assert(frame_math::RotationJump(jumpForward,prevForward));
+    assert(frame_math::RotationJump(reverseForward,prevForward));
+    assert(frame_math::RotationJump(prevForward,zeroForward));
+    FgErrorBurst fgErrors;
+    assert(fgErrors.Record(1, 7));
+    assert(fgErrors.Record(1, 7));
+    assert(fgErrors.Record(1, 7));
+    assert(!fgErrors.Record(1, 7));
+    assert(!fgErrors.Record(1, 7));
+    assert(fgErrors.Record(2, 7)); // new stage, new burst
+    assert(fgErrors.Record(2, 8)); // new code, new burst
+    fgErrors.Reset();
+    assert(fgErrors.Record(2, 8)); // successful frame restored logging
+    assert(std::abs(RecommendedFsrMipBias(1.5f)+1.5849625f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(1.7f)+1.7655347f)<0.00001f);
+    assert(std::abs(RecommendedFsrMipBias(2.0f)+2.0f)<0.00001f);
+    assert(RecommendedFsrMipBias(1.0f)==0.0f);
+    assert(TestFloatToHalf(1.0f)==0x3c00u);
+    assert(TestFloatToHalf(-1.0f)==0xbc00u);
+    assert(TestFloatToHalf(0.5f)==0x3800u);
+    assert(TestFloatToHalf(0.0f)==0);
+    assert(frame_math::MotionVectorYScale(720,-1)==-720.0f);
+    assert(frame_math::MotionVectorYScale(720,1)==720.0f);
+    assert(std::abs(frame_math::Jitter(0.5f/640,1280,1)-0.5f)<0.00001f);
+    assert(std::abs(frame_math::Jitter(0.5f/640,1280,-1)+0.5f)<0.00001f);
+    auto portraitOnLandscape = FgAspectFit(1920,1080,1080,1920);
+    assert(portraitOnLandscape.x==656 && portraitOnLandscape.y==0);
+    assert(portraitOnLandscape.width==608 && portraitOnLandscape.height==1080);
+    auto landscapeOnPortrait = FgAspectFit(1080,1920,1920,1080);
+    assert(landscapeOnPortrait.x==0 && landscapeOnPortrait.y==656);
+    assert(landscapeOnPortrait.width==1080 && landscapeOnPortrait.height==608);
+    auto letterbox = FgAspectFit(1920,1080,3840,1634);
+    assert(letterbox.x==0 && letterbox.y==131 && letterbox.width==1920 && letterbox.height==817);
+    auto same = FgAspectFit(1920,1080,1280,720);
+    assert(same.x==0 && same.y==0 && same.width==1920 && same.height==1080);
+    assert(FgAspectFit(1920,1080,0,1080).width==0);
     assert(PresetRatio(L"NativeAA")==1.0f);
     assert(PresetRatio(L"quality")==1.5f);
     assert(PresetRatio(L"Balanced")==1.7f);

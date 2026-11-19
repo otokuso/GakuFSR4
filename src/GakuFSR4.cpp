@@ -6,6 +6,7 @@
 #include "SettingsUi.h"
 #include "PluginEvent.h"
 #include "ManagedRoot.h"
+#include "MipBias.h"
 #include <array>
 #include <initializer_list>
 #include <memory>
@@ -23,6 +24,8 @@ GakuHookService hooks{};
 std::atomic<bool> enabled{false}, renderFailed{false};
 bool bound=false, attempted=false;
 bool frameGeneration=false;
+int motionVectorYSign=-1;
+int jitterXSign=-1,jitterYSign=-1;
 float ratio=1.5f, sharpness=0.2f;
 std::wstring dataPath;
 
@@ -31,6 +34,7 @@ void Log(const std::string& text, GakuLogLevel level=GAKU_LOG_INFO) {
 }
 void Stop(const std::string& why) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
 }
 
@@ -200,7 +204,7 @@ struct Capture {
 Capture& capture=*new Capture;
 struct History {
     int frame=-1,id=0,w=0,h=0;
-    float fov=0,pos[3]{};
+    float fov=0,pos[3]{},forward[3]{};
 } history;
 std::atomic<uint64_t> submitted{0}, completed{0};
 int configuredFrame=-1;
@@ -281,6 +285,10 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
         if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
             std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)+
             (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")); }
+        static bool reportedBias=false;
+        if(!reportedBias&&ratio>1) { reportedBias=true;Log("FSR recommended Mip LOD bias at ratio "+
+            std::to_string(ratio)+": "+std::to_string(RecommendedFsrMipBias(ratio))+
+            "; informational only (Unity URP may already apply a global Mip Bias)"); }
     } catch(const std::exception& e) { Stop(e.what()); }
 }
 
@@ -316,8 +324,8 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
         capture.camera=Root(At<P>(cd,field.camera)); capture.motion=Root(motion);
         capture.frame=frame;
         capture.id=id;
-        capture.jitterX=frame_math::Jitter(matrix[12],w);
-        capture.jitterY=frame_math::Jitter(matrix[13],h);
+        capture.jitterX=frame_math::Jitter(matrix[12],w,jitterXSign);
+        capture.jitterY=frame_math::Jitter(matrix[13],h,jitterYSign);
         if(offscreen && ratio==1.0f) {
             if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
                 originalTaa(cmd,material,cd,src,dst,motion,mi);
@@ -371,7 +379,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     fd.renderW=w;fd.renderH=h;fd.displayW=dw;fd.displayH=dh;
     fd.maxRenderW=w;fd.maxRenderH=h;
     fd.jitterX=capture.jitterX;fd.jitterY=capture.jitterY;
-    fd.mvScaleX=-static_cast<float>(w);fd.mvScaleY=-static_cast<float>(h);
+    fd.mvScaleX=-static_cast<float>(w);fd.mvScaleY=frame_math::MotionVectorYScale(h,motionVectorYSign);
     fd.frameTimeMs=(std::max)(0.1f,api.Value<float>(method.time)*1000);
     fd.cameraNear=api.Value<float>(method.nearPlane,capture.camera.Get());
     fd.cameraFar=api.Value<float>(method.farPlane,capture.camera.Get());
@@ -383,15 +391,16 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     using Vec3=std::array<float,3>;
     P transform=api.Invoke(method.transform,capture.camera.Get());
     auto pos=api.Value<Vec3>(method.position,transform);
+    auto forward=api.Value<Vec3>(method.forward,transform);
     fd.reset=frame_math::Reset(capture.id,history.id,capture.frame,history.frame,fov,history.fov,pos.data(),history.pos)||
-        history.w!=w||history.h!=h;
+        history.w!=w||history.h!=h||frame_math::RotationJump(forward.data(),history.forward);
     auto taa=static_cast<char*>(cd)+field.taaSettings;
     fd.reset|=At<int>(taa,field.reset)>0;
     if(frameGeneration) {
         fd.fg=1;
         std::copy(pos.begin(),pos.end(),fd.camPos);
-        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight},
-                              std::pair{method.forward,fd.camFwd}}) {
+        std::copy(forward.begin(),forward.end(),fd.camFwd);
+        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight}}) {
             auto axis=api.Value<Vec3>(getter,transform);
             std::copy(axis.begin(),axis.end(),dst);
         }
@@ -401,6 +410,7 @@ void QueueFrame(P cmd,P cd,int w,int h,int dw,int dh) {
     packet.release();submitted.fetch_add(1);
     history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
     std::copy(pos.begin(),pos.end(),history.pos);
+    std::copy(forward.begin(),forward.end(),history.forward);
 }
 
 void Final(P self,P cmd,P rd,M mi) {
@@ -546,10 +556,10 @@ void Bind() {
     method.transform=api.Method(api.Class("UnityEngine","Component"),"get_transform",{});
     auto transform=api.Class("UnityEngine","Transform");
     method.position=api.Method(transform,"get_position",{});
+    method.forward=api.Method(transform,"get_forward",{});
     if(frameGeneration) {
         method.up=api.Method(transform,"get_up",{});
         method.right=api.Method(transform,"get_right",{});
-        method.forward=api.Method(transform,"get_forward",{});
     }
     method.frame=api.Method(api.Class("UnityEngine","Time"),"get_frameCount",{});
     method.time=api.Method(api.Class("UnityEngine","Time"),"get_unscaledDeltaTime",{});
@@ -594,6 +604,20 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
             return GAKU_E_INVALID_ARGUMENT;
         }
     }
+    motionVectorYSign=GetPrivateProfileIntW(L"FSR4",L"MotionVectorYSign",-1,config.c_str());
+    if(motionVectorYSign!=1&&motionVectorYSign!=-1) {
+        Log("MotionVectorYSign must be +1 or -1",GAKU_LOG_ERROR);
+        return GAKU_E_INVALID_ARGUMENT;
+    }
+    if(motionVectorYSign==1) Log("Experimental positive Y motion-vector scale enabled; compare against the default -1 sign",GAKU_LOG_WARNING);
+    jitterXSign=GetPrivateProfileIntW(L"FSR4",L"JitterXSign",-1,config.c_str());
+    jitterYSign=GetPrivateProfileIntW(L"FSR4",L"JitterYSign",-1,config.c_str());
+    if((jitterXSign!=1&&jitterXSign!=-1)||(jitterYSign!=1&&jitterYSign!=-1)) {
+        Log("JitterXSign/JitterYSign must be +1 or -1",GAKU_LOG_ERROR);
+        return GAKU_E_INVALID_ARGUMENT;
+    }
+    if(jitterXSign!= -1||jitterYSign!=-1)
+        Log("Experimental FSR jitter sign override enabled; compare against default -1/-1",GAKU_LOG_WARNING);
     const bool configEnabled=GetPrivateProfileIntW(L"FSR4",L"Enabled",1,config.c_str())!=0;
     const bool configFg=GetPrivateProfileIntW(L"FSR4",L"FrameGeneration",0,config.c_str())!=0;
     wchar_t value[64];
@@ -640,6 +664,7 @@ void Tick(P,float) {
 }
 void Shutdown(P) {
     enabled=false;
+    FSR4_StopFrameGenerationTimer();
     // Drop managed roots while IL2CPP is alive; GPU resources remain valid for already queued packets.
     capture.camera.Clear();capture.motion.Clear();
     for(auto s:{&resources.color,&resources.depth,&resources.motion,&resources.output}) {

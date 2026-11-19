@@ -4,7 +4,10 @@
 #include <string>
 #include "imgui.h"
 #include "Preset.h"
+#include "BridgeStats.h"
 #include "SettingsUi.h"
+
+extern "C" void FSR4_GetStats(Stats* out);
 
 namespace gakufsr {
 namespace {
@@ -15,6 +18,8 @@ bool draftFrameGeneration=false;
 int draftPreset=-1;
 int draftSharpness=20;
 const char* saveMessage=nullptr;
+Stats currentStats{};
+ULONGLONG lastStatsRead=0;
 
 bool Save() {
     wchar_t sharpness[16]{};
@@ -62,6 +67,34 @@ void DrawSettings(void*) {
     if(ImGui::Button("Save settings"))
         saveMessage=Save()?"Saved. Restart the game to apply.":"Could not save settings. Check the config file permissions.";
     ImGui::TextUnformatted(saveMessage?saveMessage:"Saved settings take effect after restarting the game.");
+
+    if (ImGui::CollapsingHeader("Runtime diagnostics",ImGuiTreeNodeFlags_DefaultOpen)) {
+        ULONGLONG now=GetTickCount64();
+        if (!lastStatsRead || now-lastStatsRead>=2000) {
+            FSR4_GetStats(&currentStats);
+            lastStatsRead=now;
+        }
+        const Stats& s=currentStats;
+        if (!s.frames) {
+            ImGui::TextUnformatted("FSR has not processed a frame yet (or is disabled).");
+        } else {
+            ImGui::Text("FSR provider: %s",s.provider[0]?s.provider:"not active");
+            ImGui::Text("FSR GPU: %.2f ms (smoothed), CPU: %.2f ms",s.gpuMs,s.cpuMs);
+            ImGui::Text("FSR VRAM: %.1f MiB",s.fsrMemory/1048576.0);
+            ImGui::Text("Frames: %llu, backend failures: %u",(unsigned long long)s.frames,s.failures);
+            ImGui::Separator();
+            ImGui::Text("FG provider: %s",s.fgProvider[0]?s.fgProvider:"not active / unavailable");
+            ImGui::Text("FG GPU: %.2f ms (smoothed), VRAM: %.1f MiB",s.fgGpuMs,s.fgMemory/1048576.0);
+            ImGui::Text("FG prepared: %llu, generated: %llu, real Presents: %llu",
+                (unsigned long long)s.fgPrepared,(unsigned long long)s.fgGenerated,(unsigned long long)s.fgReal);
+            ImGui::Text("FG skipped: %llu, interval too short: %llu",
+                (unsigned long long)s.fgSkipped,(unsigned long long)s.fgNotNeeded);
+            ImGui::Text("FG interval: %.2f ms, pacing: %.2f ms",s.fgIntervalMs,s.fgPaceMs);
+            ImGui::Text("FG last dispatch result: %d",s.fgLastResult);
+            if (!s.fgProvider[0]) ImGui::TextDisabled("If FG is enabled, check the GakuLoader log for the reason.");
+        }
+        ImGui::TextDisabled("Snapshot refreshes every 2 seconds; some GPU timing values are rolling averages.");
+    }
     ImGui::SetCurrentContext(previous);
 }
 }
