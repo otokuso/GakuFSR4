@@ -238,6 +238,7 @@ namespace
 	std::atomic<uint64_t> g_dafpLastGeneratedTick{0};
 	struct NativePresentState {
 		IDXGISwapChain4* chain = nullptr;
+		DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 		ffxContext swapchainContext = nullptr;
 		ComPtr<ID3D12CommandAllocator> allocator;
 		ComPtr<ID3D12GraphicsCommandList> list;
@@ -496,8 +497,19 @@ namespace
 		ComPtr<IDXGIFactory4> factory;
 		ComPtr<IDXGIAdapter1> ad12;
 		if (!Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2")) return false;
-		if (!Check(factory->EnumAdapterByLuid(ds.AdapterLuid, IID_PPV_ARGS(&ad12)), "EnumAdapterByLuid")) return false;
-		if (!Check(D3D12CreateDevice(ad12.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&g.d12)), "D3D12CreateDevice")) return false;
+		if (!Check(UnwrapReShade(factory.Get())->EnumAdapterByLuid(ds.AdapterLuid, IID_PPV_ARGS(&ad12)), "EnumAdapterByLuid")) return false;
+		// Creating the private device through ReShade resets AutoHDR's shared device state.
+		const auto getInterface = reinterpret_cast<decltype(&D3D12GetInterface)>(
+			GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetInterface"));
+		constexpr GUID deviceFactoryClass = {0x114863bf, 0xc386, 0x4aee, {0xb3, 0x9d, 0x8f, 0x0b, 0xbb, 0x06, 0x29, 0x55}};
+		ComPtr<ID3D12DeviceFactory> deviceFactory;
+		if (getInterface && SUCCEEDED(getInterface(deviceFactoryClass, IID_PPV_ARGS(&deviceFactory))))
+			Check(deviceFactory->CreateDevice(ad12.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&g.d12)),
+				"ID3D12DeviceFactory::CreateDevice");
+		if (!g.d12) {
+			if (!Check(D3D12CreateDevice(ad12.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&g.d12)), "D3D12CreateDevice")) return false;
+			g.d12 = UnwrapReShade(g.d12.Get());
+		}
 
 		D3D12_COMMAND_QUEUE_DESC qd = {};
 		qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -944,7 +956,9 @@ namespace
 			g_fgSkipReason = "FG viewport is incompatible with the native SwapChain";
 			return false;
 		}
-		const uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
+		uint32_t flags = (fd.createFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0;
+		if (chain.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || nativePresent.colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+			flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
 		if (g.fg && g.fgDisplayW == displayW && g.fgDisplayH == displayH && g.fgRenderW == keyW && g.fgRenderH == keyH && g.fgFlags == flags) return true;
 		if (!WaitIdle("new FG context")) return false;
 		DestroyFg();
@@ -960,7 +974,7 @@ namespace
 		desc.flags = flags;
 		desc.displaySize = { displayW, displayH };
 		desc.maxRenderSize = { keyW, keyH };
-		desc.backBufferFormat = FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+		desc.backBufferFormat = ffxApiGetSurfaceFormatDX12(chain.Format);
 		desc.header.pNext = &backend.header;
 		backend.header.pNext = &version.header;
 		ffxReturnCode_t rc = g.fx.CreateContext(&g.fg, &desc.header, nullptr);
@@ -1135,6 +1149,7 @@ namespace
 
 		ComPtr<ID3D11Device> dev;
 		((ID3D11Resource*)fd.color)->GetDevice(&dev);
+		if (dev.Get() != g.d11Base) dev = UnwrapReShade(dev.Get());
 		if (g.d12 && dev.Get() != g.d11Base) {
 			if (nativePresent.chain) return;
 			Teardown("the game's D3D11 device changed");
@@ -1324,6 +1339,8 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 	const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, NativeSwapchainState& state)
 {
 	std::lock_guard<std::mutex> lock(g_renderLock);
+	const auto nativeDevice = UnwrapReShade(device);
+	device = nativeDevice.Get();
 	if (!g.fgDll || nativePresent.chain || (g.d12 && g.d11Base != device)) return DXGI_ERROR_UNSUPPORTED;
 	if (!g.d12 && !InitDevices(device)) {
 		Teardown("native swap chain startup failed");
@@ -1349,7 +1366,8 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 	create.header.pNext = &version.header;
 	create.swapchain = &state.swapchain;
 	create.gameQueue = g.queue.Get();
-	create.dxgiFactory = factory;
+	const auto nativeFactory = UnwrapReShade(factory);
+	create.dxgiFactory = nativeFactory.Get();
 	create.hwnd = window;
 	create.desc = &desc;
 	DXGI_SWAP_CHAIN_FULLSCREEN_DESC full = {};
@@ -1366,6 +1384,7 @@ HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND
 	if (SUCCEEDED(state.swapchain->GetDesc1(&actual)))
 		g.fgRetry.ObserveBackbuffer(actual.Width, actual.Height);
 	nativePresent.chain = state.swapchain;
+	nativePresent.colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 	nativePresent.swapchainContext = state.context;
 	nativePresent.allocator = std::move(allocator);
 	nativePresent.list = std::move(list);
@@ -1419,8 +1438,22 @@ HRESULT ResizeNativeSwapchain(NativeSwapchainState& state, UINT count, UINT widt
 	DestroyFg();
 	const HRESULT hr = state.swapchain->ResizeBuffers(count, width, height, format, flags);
 	DXGI_SWAP_CHAIN_DESC1 desc = {};
-	if (SUCCEEDED(hr) && SUCCEEDED(state.swapchain->GetDesc1(&desc)))
+	if (SUCCEEDED(hr) && SUCCEEDED(state.swapchain->GetDesc1(&desc))) {
 		g.fgRetry.ObserveBackbuffer(desc.Width, desc.Height);
+		Log("AMD native SwapChain resized: %ux%u, format %u.", desc.Width, desc.Height, desc.Format);
+	}
+	return hr;
+}
+
+HRESULT SetNativeSwapchainColorSpace(NativeSwapchainState& state, DXGI_COLOR_SPACE_TYPE color)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	const HRESULT hr = state.swapchain->SetColorSpace1(color);
+	if (SUCCEEDED(hr) && nativePresent.colorSpace != color) {
+		nativePresent.colorSpace = color;
+		g.fgPending = g.fgHavePrevious = false;
+		Log("AMD native SwapChain color space: %u.", color);
+	}
 	return hr;
 }
 
@@ -1449,14 +1482,17 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	if (!WaitOut(nativePresent.fence, FrameWaitMs, "native swap-chain command reuse")) return DXGI_ERROR_DEVICE_REMOVED;
 	// An unsupported texture layout or allocation failure is not a removed GPU.
 	if (!EnsureShared(g.present, source, false, "native SwapChain colour", false)) return E_FAIL;
+	ComPtr<ID3D12Resource> dest;
+	HRESULT hr = state.swapchain->GetBuffer(state.swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&dest));
+	if (FAILED(hr)) return hr;
+	const auto desc = dest->GetDesc();
+	if (Typed(desc.Format) != g.present.fmt || desc.Width != g.present.w || desc.Height != g.present.h)
+		return DXGI_ERROR_INVALID_CALL;
 	auto* allocator = nativePresent.allocator.Get();
 	auto* list = nativePresent.list.Get();
-	HRESULT hr = allocator->Reset();
+	hr = allocator->Reset();
 	if (SUCCEEDED(hr)) hr = list->Reset(allocator, nullptr);
 	if (FAILED(hr)) return hr;
-	ComPtr<ID3D12Resource> dest;
-	hr = state.swapchain->GetBuffer(state.swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&dest));
-	if (FAILED(hr)) { list->Close(); return hr; }
 	g.ctx->CopyResource(g.present.t11.Get(), source);
 	const auto ready = ++g.inValue;
 	hr = g.ctx->Signal(g.in11.Get(), ready);

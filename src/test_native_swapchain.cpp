@@ -88,6 +88,7 @@ struct Interpolation {
     ffxConfigureDescFrameGeneration config{};
     std::atomic<unsigned> generated{0};
     std::atomic<unsigned> failure{FFX_API_RETURN_OK};
+    uint32_t transfer = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
 
     void Configure(uint64_t frameID)
     {
@@ -98,6 +99,10 @@ struct Interpolation {
     static ffxReturnCode_t Dispatch(ffxDispatchDescFrameGeneration* params, void* user)
     {
         auto& self = *static_cast<Interpolation*>(user);
+        if (params->backbufferTransferFunction != self.transfer) {
+            self.failure = FFX_API_RETURN_ERROR_PARAMETER;
+            return FFX_API_RETURN_ERROR_PARAMETER;
+        }
         const auto result = self.fx.Dispatch(&self.context, &params->header);
         if (result == FFX_API_RETURN_OK) self.generated += params->numGeneratedFrames;
         else self.failure = result;
@@ -127,15 +132,18 @@ int wmain(int argc, wchar_t** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
     bool enableFg = false, borderless = false, useOn12 = false;
+    DXGI_FORMAT hdrFormat = DXGI_FORMAT_UNKNOWN;
     for (int i = 2; i < argc; ++i) {
         const std::wstring option = argv[i];
         if (option == L"--fg" && !enableFg) enableFg = true;
         else if (option == L"--borderless" && !borderless) borderless = true;
         else if (option == L"--on12" && !useOn12) useOn12 = true;
+        else if (option == L"--scrgb" && hdrFormat == DXGI_FORMAT_UNKNOWN) hdrFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        else if (option == L"--hdr10" && hdrFormat == DXGI_FORMAT_UNKNOWN) hdrFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
         else return 2;
     }
     if (argc < 2) {
-        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory> [--fg] [--borderless] [--on12]");
+        puts("Usage: test_native_swapchain.exe <official AMD FSR runtime DLL directory> [--fg] [--borderless] [--on12] [--scrgb | --hdr10]");
         return 2;
     }
     std::wstring directory = argv[1];
@@ -259,6 +267,14 @@ int wmain(int argc, wchar_t** argv)
         swapchain.Attach(rawSwapchain);
         const auto destroySwapchain = [&fx](ffxContext context) { fx.DestroyContext(&context, nullptr); };
         std::unique_ptr<void, decltype(destroySwapchain)> ownedSwapchain(swapchainContext, destroySwapchain);
+        if (hdrFormat != DXGI_FORMAT_UNKNOWN) {
+            const auto colorSpace = hdrFormat == DXGI_FORMAT_R16G16B16A16_FLOAT
+                ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+            Check(swapchain->ResizeBuffers(bufferCount, width, height, hdrFormat, swapFlags), "Resize native SwapChain to HDR");
+            Check(swapchain->SetColorSpace1(colorSpace), "Set HDR color space");
+            Check(swapchain->GetDesc1(&swapDesc), "Get resized HDR SwapChain descriptor");
+            if (swapDesc.Format != hdrFormat) throw std::runtime_error("Native SwapChain did not adopt the HDR format");
+        }
         printf("AMD native D3D12 FG SwapChain: %ux%u, %s, FG %s, SyncInterval 0, tearing %s.\n",
             width, height, borderless ? "borderless" : "windowed", enableFg ? "on" : "off",
             presentFlags ? "allowed" : "disabled");
@@ -290,7 +306,7 @@ int wmain(int argc, wchar_t** argv)
             textureDesc.Height = height;
             textureDesc.MipLevels = textureDesc.ArraySize = 1;
             textureDesc.SampleDesc.Count = 1;
-            textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            textureDesc.Format = swapDesc.Format;
             textureDesc.Usage = D3D11_USAGE_DEFAULT;
             textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
             textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
@@ -348,7 +364,12 @@ int wmain(int argc, wchar_t** argv)
             desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
             desc.header.pNext = &backend.header;
             desc.displaySize = desc.maxRenderSize = {width, height};
-            desc.backBufferFormat = FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+            desc.backBufferFormat = ffxApiGetSurfaceFormatDX12(swapDesc.Format);
+            if (hdrFormat != DXGI_FORMAT_UNKNOWN) {
+                desc.flags = FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
+                fg.transfer = hdrFormat == DXGI_FORMAT_R16G16B16A16_FLOAT
+                    ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ;
+            }
             CheckFx(fx.CreateContext(&fg.context, &desc.header, nullptr), "Create native FG");
             fg.config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
             fg.config.swapChain = swapchain.Get();

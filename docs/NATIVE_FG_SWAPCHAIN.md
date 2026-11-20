@@ -18,17 +18,21 @@ cmake --build build --config Release --target test_native_swapchain
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --borderless
 .\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --borderless --on12
+.\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --scrgb
+.\build\Release\test_native_swapchain.exe C:\AMD-FSR-runtime --fg --hdr10
 ```
 
 The test submits 480 source frames at a target of 60 FPS. `--borderless` uses the monitor containing the cursor, with a native-size backbuffer and the DXGI tearing flag. Run PresentMon 2.x with `--process_name test_native_swapchain.exe --track_frame_type` before launching the test. With SDK 2.4.0, PresentMon labels the AMD generated frames `Unknown`. Check the display intervals and compare frame-type counts with FG off. The synthetic motion and depth make this a presentation test. It requires AMD hardware for the AMD FG provider.
+
+`--scrgb` and `--hdr10` resize the AMD SwapChain from RGBA8 to the requested HDR format before presenting, set the corresponding DXGI color space and check the transfer function provided to the FG callback. Use a display with HDR enabled.
 
 `--on12` renders directly to D3D11On12 wrappers around the AMD SwapChain backbuffers. The D3D11 immediate context flushes to the same D3D12 queue before the SDK prepares and presents each frame. This path eliminates the shared-colour copy and the cross-device fence wait from the test. Both paths retain the per-frame completion fence for allocator reuse.
 
 ## Game integration
 
-Set `FrameGeneration=1` before starting the game to enable FG. The Unity factory hook creates an AMD-owned D3D12 SwapChain and exposes an RGBA8 D3D11 texture at buffer index 0. The typeless texture allows Unity to create an sRGB render-target view. The existing bridge supplies depth and motion to the AMD callback and copies the final composited backbuffer at Present. A resize drains outstanding native work before replacing the buffer and resetting FG history.
+Set `FrameGeneration=1` before starting the game to enable FG. The Unity factory hook creates an AMD-owned D3D12 SwapChain and exposes a D3D11 texture at buffer index 0. RGBA8 uses a typeless texture so Unity can create an sRGB render-target view. The bridge supplies depth and motion to the AMD callback and copies the final composited backbuffer at Present. A resize drains outstanding native work before replacing the buffer and resetting FG history.
 
-Startup requires a single-sample RGBA8 SDR flip-model swap chain. Unsupported descriptors and SDK startup failures continue through the game’s swap chain with real frames and FSR upscaling. Set `FrameGeneration=0` and restart to disable FG. The FG source is the final composited colour, including the game’s UI. Device-loss recovery and live HDR transitions still need validation.
+Startup requires a compatible single-sample flip-model swap chain. Unsupported descriptors and SDK startup failures continue through the game’s swap chain with real frames and FSR upscaling. Set `FrameGeneration=0` and restart to disable FG. The FG source is the final composited colour, including the game’s UI and any ReShade effects. See [FG backbuffer formats and HDR](FG_FORMAT_SUPPORT.md) for the supported formats.
 
 The game launched the AMD SwapChain 4.0.0 and FG 4.0.2 on the RX 9070 XT in Quality mode. The title screen displayed correctly after allowing the sRGB view, and the game recreated the buffers on transition from portrait to fullscreen landscape. A ten-second fullscreen live capture showed 595 displayed application intervals and 595 AMD-generated intervals with SyncInterval 0, at about 120 displayed FPS. The native chain used Composed Flip in that capture. A later capture contained 21 independent-flip intervals with tearing allowed, but most frames still used Composed Flip. The public AMD SDK APIs used here do not report whether the driver selected DAFP. The capture proves actual in-game interpolation and records the observed presentation modes.
 
