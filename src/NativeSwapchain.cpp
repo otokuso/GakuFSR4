@@ -7,6 +7,11 @@
 namespace {
 using Microsoft::WRL::ComPtr;
 
+bool SupportsFormat(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R16G16B16A16_FLOAT
+        || format == DXGI_FORMAT_R10G10B10A2_UNORM;
+}
+
 class NativeSwapchain final : public IDXGISwapChain4 {
     std::atomic<ULONG> references{1};
     NativeSwapchainState state;
@@ -14,14 +19,14 @@ class NativeSwapchain final : public IDXGISwapChain4 {
     ComPtr<ID3D11Texture2D> texture;
     DXGI_SWAP_CHAIN_DESC1 requested;
 
-    HRESULT MakeBuffer(UINT width, UINT height, ComPtr<ID3D11Texture2D>& buffer) {
+    HRESULT MakeBuffer(UINT width, UINT height, DXGI_FORMAT format, ComPtr<ID3D11Texture2D>& buffer) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width;
         desc.Height = height;
         desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
         // Unity can request an sRGB view of the UNORM swap-chain buffer.
         // D3D11 grants that exception to DXGI buffers, so this ordinary texture must be typeless.
-        desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        desc.Format = format == DXGI_FORMAT_R8G8B8A8_UNORM ? DXGI_FORMAT_R8G8B8A8_TYPELESS : format;
         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if(requested.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS) desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
         return device->CreateTexture2D(&desc, nullptr, &buffer);
@@ -40,7 +45,7 @@ public:
             if(!requested.Width) requested.Width = static_cast<UINT>(client.right);
             if(!requested.Height) requested.Height = static_cast<UINT>(client.bottom);
         }
-        const HRESULT hr = MakeBuffer(requested.Width, requested.Height, texture);
+        const HRESULT hr = MakeBuffer(requested.Width, requested.Height, requested.Format, texture);
         return FAILED(hr) ? hr : CreateNativeSwapchain(factory, device.Get(), window, requested, fullscreen, state);
     }
 
@@ -89,7 +94,8 @@ public:
         return PresentNativeSwapchain(state, texture.Get(), sync, flags, params);
     }
     HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) override {
-        if(format != DXGI_FORMAT_UNKNOWN && format != requested.Format) return DXGI_ERROR_UNSUPPORTED;
+        const DXGI_FORMAT bufferFormat = format == DXGI_FORMAT_UNKNOWN ? requested.Format : format;
+        if(!SupportsFormat(bufferFormat)) return DXGI_ERROR_INVALID_CALL;
         if(!width || !height) {
             HWND window{};
             RECT client{};
@@ -99,12 +105,13 @@ public:
             if(!height) height = static_cast<UINT>(client.bottom);
         }
         ComPtr<ID3D11Texture2D> replacement;
-        HRESULT hr = MakeBuffer(width, height, replacement);
+        HRESULT hr = MakeBuffer(width, height, bufferFormat, replacement);
         if(SUCCEEDED(hr)) hr = ResizeNativeSwapchain(state, count, width, height, format, flags);
         if(SUCCEEDED(hr)) {
             texture = std::move(replacement);
             requested.Width = width;
             requested.Height = height;
+            requested.Format = bufferFormat;
             if(count) requested.BufferCount = count;
             requested.Flags = flags;
         }
@@ -155,7 +162,9 @@ public:
     HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE color, UINT* support) override {
         return state.swapchain->CheckColorSpaceSupport(color, support);
     }
-    HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE color) override { return state.swapchain->SetColorSpace1(color); }
+    HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE color) override {
+        return SetNativeSwapchainColorSpace(state, color);
+    }
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE type, UINT size, void* data) override {
         return state.swapchain->SetHDRMetaData(type, size, data);
     }
@@ -164,7 +173,7 @@ public:
 
 HRESULT CreateNativeD3D11Proxy(IDXGIFactory2* factory, ID3D11Device* device, HWND window,
     const DXGI_SWAP_CHAIN_DESC1& desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, IDXGISwapChain1** chain) {
-    if(!chain || desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM || desc.SampleDesc.Count != 1 || desc.Stereo
+    if(!chain || !SupportsFormat(desc.Format) || desc.SampleDesc.Count != 1 || desc.Stereo
         || !(desc.BufferUsage & DXGI_USAGE_RENDER_TARGET_OUTPUT)
         || (desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_DISCARD && desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
         return DXGI_ERROR_UNSUPPORTED;

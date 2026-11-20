@@ -291,7 +291,9 @@ bool CaptureGameSwapChain(const GakuHookService& hooks, bool enableFrameGenerati
 {
 	ComPtr<IDXGIFactory2> factory;
 	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
-	auto vtable = *reinterpret_cast<void***>(factory.Get());
+	// ReShade must process the creation call and wrap the returned D3D11 chain.
+	const auto nativeFactory = UnwrapReShade(factory.Get());
+	auto vtable = *reinterpret_cast<void***>(nativeFactory.Get());
 	GakuHookRequest requests[]{
 		{vtable[10], reinterpret_cast<void*>(&CreateHook), reinterpret_cast<void**>(&g_create)},
 		{vtable[15], reinterpret_cast<void*>(&CreateForHwndHook), reinterpret_cast<void**>(&g_createForHwnd)}
