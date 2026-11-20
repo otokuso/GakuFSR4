@@ -162,6 +162,10 @@ struct Methods {
     P rtClass,rtiClass;
 } method{};
 
+bool LiveTexture(P texture) {
+    return texture && At<P>(texture,field.objectPtr);
+}
+
 struct Surface {
     Root texture,handle;
     P native=nullptr;
@@ -209,6 +213,9 @@ struct Resources : Surfaces {
         for(auto& old:retired) if(!old.lifetime->InUse()) old.surfaces.ClearRoots();
     }
     int w=0,h=0,dw=0,dh=0;
+    void InvalidateDeadColorSurfaces() {
+        if(!LiveTexture(color.texture.Get()) || !LiveTexture(output.texture.Get())) w=0;
+    }
     void Ensure(int rw,int rh,int displayW,int displayH) {
         if(w==rw&&h==rh&&dw==displayW&&dh==displayH) return;
         Reap();
@@ -395,8 +402,11 @@ void Init(P camera,P additional,bool resolve,P cd,M mi) {
 
 void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool beforePost=false);
 
-bool LiveTexture(P texture) {
-    return texture && At<P>(texture,field.objectPtr);
+void QueueFrameFromSource(ResourceUse& use,P cmd,P cd,P source,int w,int h,int dw,int dh) {
+    resources.Ensure(w,h,dw,dh);
+    use.Begin(cmd);
+    BlitCamera(cmd,source,resources.color.handle.Get());
+    QueueFrame(use,cd,w,h,dw,dh);
 }
 
 void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
@@ -447,8 +457,7 @@ void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
                 return;
             }
             stage="allocate frame textures";
-            if(!LiveTexture(resources.color.texture.Get()) || !LiveTexture(resources.output.texture.Get()))
-                resources.w=0;
+            resources.InvalidateDeadColorSurfaces();
             resources.Ensure(w,h,w,h);
             use.Begin(cmd);
             stage="copy scene color";
@@ -602,10 +611,7 @@ void Final(P self,P cmd,P rd,M mi) {
                 dw=At<int>(cd,field.pixelW);dh=At<int>(cd,field.pixelH);
                 if(w!=At<int>(desc,field.descWidth)||h!=At<int>(desc,field.descHeight))
                     throw std::runtime_error("Scaled RTHandles are not supported by this integration");
-                resources.Ensure(w,h,dw,dh);
-                use.Begin(cmd);
-                BlitCamera(cmd,source,resources.color.handle.Get());
-                QueueFrame(use,cd,w,h,dw,dh);
+                QueueFrameFromSource(use,cmd,cd,source,w,h,dw,dh);
                 output=resources.output.handle.Get();
             }
 
@@ -638,12 +644,8 @@ void ResolveBlit(P cmd,P cd,P src,P dst,int load,int store,P material,int pass,M
             if(LiveTexture(texture) && LiveTexture(capture.motion.Get()) &&
                frame_math::UpscaleSource(api.Value<int>(method.width,texture),
                    api.Value<int>(method.height,texture),w,h,dw,dh)) {
-                if(!LiveTexture(resources.color.texture.Get()) || !LiveTexture(resources.output.texture.Get()))
-                    resources.w=0;
-                resources.Ensure(w,h,dw,dh);
-                use.Begin(cmd);
-                BlitCamera(cmd,src,resources.color.handle.Get());
-                QueueFrame(use,cd,w,h,dw,dh);
+                resources.InvalidateDeadColorSurfaces();
+                QueueFrameFromSource(use,cmd,cd,src,w,h,dw,dh);
                 input=resources.output.handle.Get();
                 capture.frame=-1;
                 static bool reported=false;
@@ -755,6 +757,40 @@ void Bind() {
         (frameGeneration?". Frame generation enabled.":". Frame generation disabled."));
 }
 
+bool ConfigureFgViewport(const std::wstring& config) {
+    const auto readViewport=[&](const wchar_t* name) {
+        wchar_t text[32]{};
+        const auto count=GetPrivateProfileStringW(L"FSR4",name,L"0",text,32,config.c_str());
+        wchar_t* end=nullptr;
+        const long value=wcstol(text,&end,10);
+        return count<31 && end!=text && !*end && value>=0 && value<=16384 ? value : -1L;
+    };
+    const auto x=readViewport(L"FGViewportX"), y=readViewport(L"FGViewportY");
+    const auto w=readViewport(L"FGViewportW"), h=readViewport(L"FGViewportH");
+    if(x<0||y<0||w<0||h<0||((w==0)!=(h==0))||(!w&&(x||y))) {
+        Log("Invalid FGViewport override; skipping frame generation",GAKU_LOG_WARNING);
+        return false;
+    }
+    FSR4_SetFgViewportOverride(x,y,w,h);
+    return true;
+}
+
+void ConfigureFgDistortion(const std::wstring& config) {
+    float k1=0,k2=0,centerX=.5f,centerY=.5f;
+    const auto readField=[&](const wchar_t* name,const wchar_t* fallback,float& result) {
+        wchar_t text[64];
+        const auto count=GetPrivateProfileStringW(L"FSR4",name,fallback,text,64,config.c_str());
+        wchar_t* end=nullptr;
+        result=wcstof(text,&end);
+        return count<63 && end!=text && !*end && std::isfinite(result);
+    };
+    if(!readField(L"FGDistortionK1",L"0",k1) || !readField(L"FGDistortionK2",L"0",k2) ||
+       !readField(L"FGDistortionCenterX",L"0.5",centerX) || !readField(L"FGDistortionCenterY",L"0.5",centerY) ||
+       !FSR4_SetFgRadialDistortion(k1,k2,centerX,centerY)) {
+        Log("Invalid FG radial distortion settings; using normal frame generation",GAKU_LOG_WARNING);
+    }
+}
+
 GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(!host||!state||host->abiVersion!=GAKU_ABI_VERSION||host->structSize<sizeof(GakuHostApi)||!host->queryService)
         return GAKU_E_VERSION;
@@ -815,38 +851,8 @@ GakuStatus Activate(const GakuHostApi* host,P* state) {
     if(!configEnabled) { *state=nullptr; return GAKU_OK; }
     if(!FSR4_Load(dataPath.c_str())) { Log("AMD FSR DLL loading failed",GAKU_LOG_ERROR); return GAKU_E_UNAVAILABLE; }
     frameGeneration=configFg && FSR4_LoadFrameGeneration(dataPath.c_str());
-    if(frameGeneration) {
-        const auto readViewport=[&](const wchar_t* name) {
-            wchar_t text[32]{};
-            const auto count=GetPrivateProfileStringW(L"FSR4",name,L"0",text,32,config.c_str());
-            wchar_t* end=nullptr;
-            const long value=wcstol(text,&end,10);
-            return count<31 && end!=text && !*end && value>=0 && value<=16384 ? value : -1L;
-        };
-        const auto x=readViewport(L"FGViewportX"), y=readViewport(L"FGViewportY");
-        const auto w=readViewport(L"FGViewportW"), h=readViewport(L"FGViewportH");
-        if(x<0||y<0||w<0||h<0||((w==0)!=(h==0))||(!w&&(x||y))) {
-            Log("Invalid FGViewport override; skipping frame generation",GAKU_LOG_WARNING);
-            frameGeneration=false;
-        } else {
-            FSR4_SetFgViewportOverride(x,y,w,h);
-        }
-    }
-    if(frameGeneration) {
-        float k1=0,k2=0,centerX=.5f,centerY=.5f;
-        const auto readField=[&](const wchar_t* name,const wchar_t* fallback,float& result) {
-            wchar_t text[64];
-            const auto count=GetPrivateProfileStringW(L"FSR4",name,fallback,text,64,config.c_str());
-            wchar_t* end=nullptr;
-            result=wcstof(text,&end);
-            return count<63 && end!=text && !*end && std::isfinite(result);
-        };
-        if(!readField(L"FGDistortionK1",L"0",k1) || !readField(L"FGDistortionK2",L"0",k2) ||
-           !readField(L"FGDistortionCenterX",L"0.5",centerX) || !readField(L"FGDistortionCenterY",L"0.5",centerY) ||
-           !FSR4_SetFgRadialDistortion(k1,k2,centerX,centerY)) {
-            Log("Invalid FG radial distortion settings; using normal frame generation",GAKU_LOG_WARNING);
-        }
-    }
+    if(frameGeneration) frameGeneration=ConfigureFgViewport(config);
+    if(frameGeneration) ConfigureFgDistortion(config);
     if(ratio==1.0f)
         Log("Native AA route: screen TAA pass; jitter sequence "+
             std::to_string(SelectJitterPhaseCount(jitterPhaseMode,ratio))+" phases");
