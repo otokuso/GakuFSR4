@@ -8,25 +8,20 @@ import statistics
 import sys
 from pathlib import Path
 
-
-def percentile(values, fraction):
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * fraction
-    lower = math.floor(index)
-    upper = math.ceil(index)
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
+if __package__:
+    from .frame_metrics import one_percent_low_fps, percentile
+else:
+    from frame_metrics import one_percent_low_fps, percentile
 
 
 def summarize(times_ms):
     if not times_ms or any(not math.isfinite(t) or t <= 0 for t in times_ms):
         raise ValueError("At least one strictly positive, finite frame interval is required")
     mean_ms = statistics.fmean(times_ms)
-    worst_count = max(1, math.ceil(len(times_ms) * 0.01))
-    worst_mean_ms = statistics.fmean(sorted(times_ms, reverse=True)[:worst_count])
     return {
         "frames": len(times_ms),
         "avg_fps": 1000.0 / mean_ms,
-        "one_percent_low_fps": 1000.0 / worst_mean_ms,
+        "one_percent_low_fps": one_percent_low_fps(times_ms),
         "p95_ms": percentile(times_ms, 0.95),
         "p99_ms": percentile(times_ms, 0.99),
         "max_ms": max(times_ms),

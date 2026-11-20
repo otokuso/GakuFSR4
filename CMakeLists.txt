@@ -6,7 +6,8 @@ add_library(gaku_imgui STATIC
   vendor/imgui/imgui_tables.cpp vendor/imgui/imgui_widgets.cpp)
 target_include_directories(gaku_imgui PUBLIC vendor/imgui)
 set_property(TARGET gaku_imgui PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
-add_library(GakuFSR4 SHARED src/GakuFSR4.cpp vendor/ghpc/present.cpp src/SettingsUi.cpp src/NativeSwapchain.cpp)
+add_library(GakuFSR4 SHARED src/GakuFSR4.cpp src/UnityRenderer.cpp src/PluginConfig.cpp
+  src/SettingsUi.cpp src/NativeSwapchain.cpp vendor/ghpc/bridge.cpp vendor/ghpc/present.cpp)
 target_compile_features(GakuFSR4 PRIVATE cxx_std_17)
 target_include_directories(GakuFSR4 PRIVATE include
   vendor/ghpc/ffx/Kits/FidelityFX/api/include

@@ -12,6 +12,14 @@ bool SupportsFormat(DXGI_FORMAT format) {
         || format == DXGI_FORMAT_R10G10B10A2_UNORM;
 }
 
+bool FillMissingDimensions(HWND window, UINT& width, UINT& height) {
+    RECT client{};
+    if(!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0) return false;
+    if(!width) width = static_cast<UINT>(client.right);
+    if(!height) height = static_cast<UINT>(client.bottom);
+    return true;
+}
+
 class NativeSwapchain final : public IDXGISwapChain4 {
     std::atomic<ULONG> references{1};
     NativeSwapchainState state;
@@ -38,13 +46,8 @@ public:
     ~NativeSwapchain() { DestroyNativeSwapchain(state); }
 
     HRESULT Initialize(IDXGIFactory2* factory, HWND window, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen) {
-        if(!requested.Width || !requested.Height) {
-            RECT client{};
-            if(!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0)
-                return DXGI_ERROR_UNSUPPORTED;
-            if(!requested.Width) requested.Width = static_cast<UINT>(client.right);
-            if(!requested.Height) requested.Height = static_cast<UINT>(client.bottom);
-        }
+        if((!requested.Width || !requested.Height) && !FillMissingDimensions(window, requested.Width, requested.Height))
+            return DXGI_ERROR_UNSUPPORTED;
         const HRESULT hr = MakeBuffer(requested.Width, requested.Height, requested.Format, texture);
         return FAILED(hr) ? hr : CreateNativeSwapchain(factory, device.Get(), window, requested, fullscreen, state);
     }
@@ -98,11 +101,8 @@ public:
         if(!SupportsFormat(bufferFormat)) return DXGI_ERROR_INVALID_CALL;
         if(!width || !height) {
             HWND window{};
-            RECT client{};
-            if(FAILED(GetHwnd(&window)) || !GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0)
+            if(FAILED(GetHwnd(&window)) || !FillMissingDimensions(window, width, height))
                 return DXGI_ERROR_INVALID_CALL;
-            if(!width) width = static_cast<UINT>(client.right);
-            if(!height) height = static_cast<UINT>(client.bottom);
         }
         ComPtr<ID3D11Texture2D> replacement;
         HRESULT hr = MakeBuffer(width, height, bufferFormat, replacement);

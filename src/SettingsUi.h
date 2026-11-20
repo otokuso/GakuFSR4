@@ -3,6 +3,7 @@
 #include <cstdint>
 
 namespace gakufsr {
+struct PluginConfig;
 struct NativeAaDiagnostics {
     bool selected=false, inputHdr=false;
     int jitterPhases=1024;
@@ -11,7 +12,6 @@ struct NativeAaDiagnostics {
 };
 NativeAaDiagnostics ReadNativeAaDiagnostics();
 void RequestNativeAaHistoryReset();
-void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,bool enabled,float ratio,float sharpness,
-    bool frameGeneration,int jitterPhaseMode);
+void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,const PluginConfig& config);
 void DrawSettings(void*);
 }
