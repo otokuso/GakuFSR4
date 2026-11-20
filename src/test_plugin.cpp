@@ -47,6 +47,13 @@ int wmain(int argc,wchar_t** argv){
     auto module=LoadLibraryW(argv[1]);if(!module) return 3;
     auto query=reinterpret_cast<FnGakuPlugin_Query>(GetProcAddress(module,"GakuPlugin_Query"));
     if(!query) return 4;
+    auto renderEvent=reinterpret_cast<void*(*)()>(GetProcAddress(module,"FSR4_GetRenderEventFunc"));
+    auto layoutField=reinterpret_cast<int(*)(int,int,const char**,uint32_t*)>(GetProcAddress(module,"FSR4_LayoutField"));
+    if(!renderEvent || !renderEvent() || !layoutField) return 10;
+    const char* fieldName=nullptr;
+    uint32_t offset=0;
+    if(!layoutField(0,29,&fieldName,&offset) || strcmp(fieldName,"camFwd") || offset!=160 ||
+       !layoutField(1,43,&fieldName,&offset) || strcmp(fieldName,"fgHudless") || offset!=672) return 11;
     GakuPluginDescriptor descriptor{};
     if(query(99,sizeof descriptor,&descriptor)!=GAKU_E_VERSION||
        query(1,1,&descriptor)!=GAKU_E_SIZE||query(1,sizeof descriptor,nullptr)!=GAKU_E_INVALID_ARGUMENT||

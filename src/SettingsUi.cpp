@@ -4,17 +4,13 @@
 #include <string>
 #include "imgui.h"
 #include "Preset.h"
+#include "PluginConfig.h"
 #include "TaaJitter.h"
-#include "BridgeStats.h"
+#include "FsrBridge.h"
 #include "PresentRate.h"
 #include "LiveTiming.h"
 #include "DafpDiagnostics.h"
 #include "SettingsUi.h"
-
-extern "C" void FSR4_GetStats(Stats* out);
-extern "C" const char* FSR4_GetLastFgSkipReason();
-extern "C" bool FSR4_UsesNativeSwapchain();
-extern "C" void FSR4_GetDafpDiagnostics(DafpDiagnostics* out);
 
 namespace gakufsr {
 namespace {
@@ -64,31 +60,8 @@ bool Save() {
         write(L"JitterPhaseMode",draftJitterPhaseMode==2?L"2":draftJitterPhaseMode==1?L"1":L"0") &&
         write(L"Enabled",draftEnabled?L"1":L"0");
 }
-}
 
-void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,bool enabled,float ratio,float sharpness,
-    bool frameGeneration,int jitterPhaseMode) {
-    if(host->queryService(host->hostContext,GAKU_SERVICE_DESKTOP_UI,1,sizeof desktop,&desktop)!=GAKU_OK) return;
-    configPath=path;
-    draftEnabled=enabled;
-    draftFrameGeneration=frameGeneration;
-    draftSharpness=static_cast<int>(std::lround(sharpness*100));
-    draftJitterPhaseMode=jitterPhaseMode;
-    draftPreset=-1;
-    for(int i=0;i<static_cast<int>(std::size(FsrPresets));++i)
-        if(FsrPresets[i].ratio==ratio) draftPreset=i;
-}
-
-void DrawSettings(void*) {
-    if(!desktop.bind || configPath.empty()) return;
-    const GakuImGuiAbi abi{IMGUI_VERSION_NUM,sizeof(ImGuiIO),sizeof(ImGuiStyle),
-        sizeof(ImDrawVert),sizeof(ImDrawIdx),sizeof(ImWchar)};
-    GakuDesktopUiBinding binding{};
-    if(desktop.bind(&abi,sizeof binding,&binding)!=GAKU_OK ||
-       !binding.imguiContext || !binding.alloc || !binding.free) return;
-    ImGui::SetAllocatorFunctions(binding.alloc,binding.free,binding.allocatorUserData);
-    auto* previous=ImGui::GetCurrentContext();
-    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(binding.imguiContext));
+void DrawLiveTiming() {
     static PresentRate fps;
     fps.Sample(GetTickCount64(),ReadPresentCounts());
     if(fps.ready)
@@ -120,6 +93,9 @@ void DrawSettings(void*) {
         ImGui::TextWrapped("Not display-frame pacing or full input-to-screen latency. "
             "For displayed frames and input-to-photon estimates, capture with PresentMon.");
     }
+}
+
+void DrawConfigControls() {
     ImGui::Checkbox("Enable FSR 4",&draftEnabled);
     ImGui::Checkbox("Frame Generation (2x)",&draftFrameGeneration);
     if(ImGui::BeginCombo("Preset",draftPreset<0?"Custom ratio":FsrPresets[draftPreset].label)) {
@@ -138,7 +114,9 @@ void DrawSettings(void*) {
     if(ImGui::Button("Save settings"))
         saveMessage=Save()?"Saved. Restart the game to apply.":"Could not save settings. Check the config file permissions.";
     ImGui::TextUnformatted(saveMessage?saveMessage:"Saved settings take effect after restarting the game.");
+}
 
+void DrawRuntimeDiagnostics() {
     if (ImGui::CollapsingHeader("Runtime diagnostics",ImGuiTreeNodeFlags_DefaultOpen)) {
         const auto aa=ReadNativeAaDiagnostics();
         if(aa.selected) {
@@ -214,6 +192,34 @@ void DrawSettings(void*) {
         if(lastFgSkip) ImGui::TextWrapped("Last FG skip: %s",lastFgSkip);
         ImGui::TextDisabled("Snapshot refreshes every 2 seconds; some GPU timing values are rolling averages.");
     }
+}
+}
+
+void InitSettingsUi(const GakuHostApi* host,const wchar_t* path,const PluginConfig& config) {
+    if(host->queryService(host->hostContext,GAKU_SERVICE_DESKTOP_UI,1,sizeof desktop,&desktop)!=GAKU_OK) return;
+    configPath=path;
+    draftEnabled=config.enabled;
+    draftFrameGeneration=config.frameGeneration;
+    draftSharpness=static_cast<int>(std::lround(config.sharpness*100));
+    draftJitterPhaseMode=config.jitterPhaseMode;
+    draftPreset=-1;
+    for(int i=0;i<static_cast<int>(std::size(FsrPresets));++i)
+        if(FsrPresets[i].ratio==config.ratio) draftPreset=i;
+}
+
+void DrawSettings(void*) {
+    if(!desktop.bind || configPath.empty()) return;
+    const GakuImGuiAbi abi{IMGUI_VERSION_NUM,sizeof(ImGuiIO),sizeof(ImGuiStyle),
+        sizeof(ImDrawVert),sizeof(ImDrawIdx),sizeof(ImWchar)};
+    GakuDesktopUiBinding binding{};
+    if(desktop.bind(&abi,sizeof binding,&binding)!=GAKU_OK ||
+       !binding.imguiContext || !binding.alloc || !binding.free) return;
+    ImGui::SetAllocatorFunctions(binding.alloc,binding.free,binding.allocatorUserData);
+    auto* previous=ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(binding.imguiContext));
+    DrawLiveTiming();
+    DrawConfigControls();
+    DrawRuntimeDiagnostics();
     ImGui::SetCurrentContext(previous);
 }
 }

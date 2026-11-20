@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <mutex>
 #include "GakuPlugin.h"
+#include "../../src/PresentHook.h"
 #include "../../src/PresentHookSlots.h"
 #include "../../src/PresentHookRetry.h"
 #include "../../src/PresentRate.h"
@@ -16,7 +17,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-void BridgeLog(const char* fmt, ...);
 using PresentCall = HRESULT (*)(IDXGISwapChain*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 
 namespace

@@ -1,0 +1,684 @@
+#include "PluginRuntime.h"
+#include "Il2CppApi.h"
+#include "FsrBridge.h"
+#include "FrameMath.h"
+#include "LiveTiming.h"
+#include "MipBias.h"
+#include "PluginEvent.h"
+#include "PrimaryCamera.h"
+#include "RenderWorkQueue.h"
+#include "SettingsUi.h"
+#include "ffx_upscale.h"
+#include <d3d11.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <memory>
+#include <utility>
+#include <vector>
+
+namespace gakufsr {
+using Microsoft::WRL::ComPtr;
+std::atomic<bool> renderFailed{false};
+bool attempted=false;
+
+struct Packet {
+    FrameData data{};
+    std::array<ComPtr<ID3D11Resource>,4> textures;
+};
+// Unity may still call a completion event after plugin shutdown.
+RenderWorkQueue<Packet,32>& renderWork=*new RenderWorkQueue<Packet,32>;
+
+void Stop(const std::string& why) {
+    enabled=false;
+    renderWork.CancelPackets();
+    Log(why+"; using the game's renderer.",GAKU_LOG_WARNING);
+}
+
+Api api;
+
+using Root = ManagedRoot<api>;
+template<class T> T& At(P p,int offset) { return *reinterpret_cast<T*>(static_cast<char*>(p)+offset); }
+
+struct Layout {
+    int renderCamera, camera, type, target, baseType, hdr, aa, descriptor, pixelW,pixelH,scale,scaling,filter;
+    int taaSettings, taaOffset, taaJitter, matrix, reset, taaData, resolve, xr;
+    int descWidth,descHeight,descMsaa;
+    int source,swap,postEnabled,rt,cameraStack,additionalType,renderer,commandBufferPtr,objectPtr;
+    size_t cameraSize,descSize,rtiSize;
+} field{};
+struct Methods {
+    M rtCtor,rtCreate,rtRelease,rtPtr,rtRandomWrite,rtHandleAlloc,rtHandleRelease;
+    M width,height,targetDimension,targetSamples,targetDynamic,rtiTexture,rtiId,blit,blitCamera;
+    PluginEventFn event=nullptr;
+    M nearPlane,farPlane,fov,id,transform,position,frame,time,reversed,device,orthographic,dynamicResolution;
+    M up,right,forward;
+    M getBackBuffer;
+    P rtClass,rtiClass;
+} method{};
+
+bool LiveTexture(P texture) {
+    return texture && At<P>(texture,field.objectPtr);
+}
+
+struct Surface {
+    Root texture,handle;
+    P native=nullptr;
+    void Release() {
+        if(handle.Get()) api.Invoke(method.rtHandleRelease,handle.Get());
+        handle.Clear();
+        texture.Clear(); native=nullptr;
+    }
+    void Create(int w,int h,int format,bool output=false) {
+        texture=Root(api.object_new(method.rtClass));
+        int depth=0,readWrite=1;
+        api.Invoke(method.rtCtor,texture.Get(),{&w,&h,&depth,&format,&readWrite});
+        if(output) { bool yes=true; api.Invoke(method.rtRandomWrite,texture.Get(),{&yes}); }
+        if(!api.Value<bool>(method.rtCreate,texture.Get())) throw std::runtime_error("RenderTexture.Create failed");
+        native=api.Value<P>(method.rtPtr,texture.Get());
+        if(!native) throw std::runtime_error("Missing native texture");
+        handle=Root(api.Invoke(method.rtHandleAlloc,nullptr,{texture.Get()}));
+        if(!handle.Get()) throw std::runtime_error("RTHandles.Alloc failed");
+    }
+};
+struct Surfaces {
+    Surface color,depth,motion,output;
+    void Release() { color.Release(); depth.Release(); motion.Release(); output.Release(); }
+    void ClearRoots() {
+        for(auto* s:{&color,&depth,&motion,&output}) { s->handle.Clear(); s->texture.Clear(); }
+    }
+};
+struct Resources : Surfaces {
+    static constexpr std::size_t maxRetired=3;
+    std::unique_ptr<ResourceLifetime> lifetime=std::make_unique<ResourceLifetime>();
+    struct Retired {
+        Surfaces surfaces;
+        std::unique_ptr<ResourceLifetime> lifetime;
+    };
+    std::vector<Retired> retired;
+    void Reap() {
+        for(auto it=retired.begin();it!=retired.end();) {
+            if(it->lifetime->InUse()) { ++it; continue; }
+            it->surfaces.Release();
+            it=retired.erase(it);
+        }
+    }
+    void ClearIdleRoots() {
+        if(!lifetime->InUse()) ClearRoots();
+        for(auto& old:retired) if(!old.lifetime->InUse()) old.surfaces.ClearRoots();
+    }
+    int w=0,h=0,dw=0,dh=0;
+    void InvalidateDeadColorSurfaces() {
+        if(!LiveTexture(color.texture.Get()) || !LiveTexture(output.texture.Get())) w=0;
+    }
+    void Ensure(int rw,int rh,int displayW,int displayH) {
+        if(w==rw&&h==rh&&dw==displayW&&dh==displayH) return;
+        Reap();
+        if(lifetime->InUse()) {
+            if(retired.size()>=maxRetired)
+                throw std::runtime_error("Too many old RTHandle sets still have queued render commands");
+            // Allocate before moving ownership so allocation failure leaves the old roots intact.
+            auto next=std::make_unique<ResourceLifetime>();
+            auto& old=retired.emplace_back();
+            old.surfaces=std::move(static_cast<Surfaces&>(*this));
+            old.lifetime=std::move(lifetime);
+            lifetime=std::move(next);
+            Log("Retained old RTHandles for queued render commands");
+        } else Release();
+        w=h=dw=dh=0;
+        color.Create(rw,rh,2); depth.Create(rw,rh,14); motion.Create(rw,rh,13);
+        output.Create(displayW,displayH,2,true);
+        w=rw;h=rh;dw=displayW;dh=displayH;
+        Log("Allocated "+std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh));
+    }
+};
+// The plugin is process-resident; never invoke IL2CPP from a CRT/DLL detach destructor.
+Resources& resources=*new Resources;
+void __stdcall CompleteResourceUse(int eventId,P data) {
+    if(eventId==2) renderWork.Complete(reinterpret_cast<std::uintptr_t>(data));
+}
+struct ResourceUse {
+    P cmd=nullptr;
+    std::uintptr_t id=0;
+    void Begin(P commandBuffer) {
+        id=renderWork.Begin(*resources.lifetime);
+        if(!id)
+            throw std::runtime_error("Render resource completion events are not being consumed");
+        cmd=commandBuffer;
+    }
+    ~ResourceUse() {
+        if(!id) return;
+        try {
+            // Place the marker after Unity has recorded the last use of the output.
+            QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
+                reinterpret_cast<P>(&CompleteResourceUse),2,reinterpret_cast<P>(id));
+        } catch(...) {
+            // A lost marker cannot safely be treated as completion.
+            renderFailed=true;
+        }
+    }
+};
+
+using InitFn=void(*)(P,P,bool,P,M);
+using TaaFn=void(*)(P,P,P,P,P,P,M);
+using FinalFn=void(*)(P,P,P,M);
+using ResolveBlitFn=void(*)(P,P,P,P,int,int,P,int,M);
+InitFn originalInit=nullptr;
+TaaFn originalTaa=nullptr;
+FinalFn originalFinal=nullptr;
+ResolveBlitFn originalResolveBlit=nullptr;
+
+struct Capture {
+    Root camera,motion;
+    int frame=-1,id=0;
+    float jitterX=0,jitterY=0;
+    bool earlyNativeAA=false;
+};
+Capture& capture=*new Capture;
+struct History {
+    int frame=-1,id=0,w=0,h=0;
+    float fov=0,pos[3]{},forward[3]{};
+} history;
+std::atomic<uint64_t> completed{0};
+std::atomic<uint64_t> nativeEarlyQueued{0},nativeFinalQueued{0},nativeOffscreenQueued{0},nativeResetsQueued{0};
+std::atomic<float> nativeLastJitterX{0},nativeLastJitterY{0};
+std::atomic<bool> nativeLastInputHdr{false};
+std::atomic<bool> nativeHistoryResetRequested{false};
+int configuredFrame=-1;
+std::vector<int> configuredCameras;
+PrimaryCamera primaryCamera;
+
+NativeAaDiagnostics ReadNativeAaDiagnostics() {
+    NativeAaDiagnostics info{};
+    info.selected=enabled && options.ratio==1.0f;
+    info.jitterPhases=SelectJitterPhaseCount(options.jitterPhaseMode,options.ratio);
+    info.beforePostQueued=nativeEarlyQueued.load();
+    info.finalQueued=nativeFinalQueued.load();
+    info.offscreenQueued=nativeOffscreenQueued.load();
+    info.resetsQueued=nativeResetsQueued.load();
+    info.lastJitterX=nativeLastJitterX.load();
+    info.lastJitterY=nativeLastJitterY.load();
+    info.inputHdr=nativeLastInputHdr.load();
+    return info;
+}
+void RequestNativeAaHistoryReset() { nativeHistoryResetRequested.store(true); }
+
+void BlitCamera(P cmd,P src,P dst) {
+    float mip=0; bool bilinear=false;
+    api.Invoke(method.blitCamera,nullptr,{cmd,src,dst,&mip,&bilinear});
+}
+void Blit(P cmd,P texture,P destination,bool globalDepth=false) {
+    std::vector<char> src(field.rtiSize),dst(field.rtiSize);
+    using TexCtor=void(*)(P,P,M);
+    using IdCtor=void(*)(P,int,M);
+    if(globalDepth) {
+        // The property is resolved when the command executes, after URP's depth copy.
+        static int depthId=0;
+        if(!depthId) {
+            auto shader=api.Class("UnityEngine","Shader");
+            auto prop=api.Method(shader,"PropertyToID",{"System.String"});
+            using StringNew=P(*)(const char*);
+            auto makeString=reinterpret_cast<StringNew>(GetProcAddress(static_cast<HMODULE>(runtime.getGameAssembly()),"il2cpp_string_new"));
+            if(!makeString) throw std::runtime_error("Missing il2cpp_string_new");
+            depthId=api.Value<int>(prop,nullptr,{makeString("_CameraDepthTexture")});
+        }
+        reinterpret_cast<IdCtor>(*static_cast<P const*>(method.rtiId))(src.data(),depthId,method.rtiId);
+    } else reinterpret_cast<TexCtor>(*static_cast<P const*>(method.rtiTexture))(src.data(),texture,method.rtiTexture);
+    reinterpret_cast<TexCtor>(*static_cast<P const*>(method.rtiTexture))(dst.data(),destination,method.rtiTexture);
+    api.Invoke(method.blit,cmd,{src.data(),dst.data()});
+}
+
+void __stdcall RenderEvent(int eventId,P data) {
+    if(eventId!=1) return;
+    auto packet=renderWork.Take(reinterpret_cast<std::uintptr_t>(data));
+    if(!packet) return;
+    OnRenderEvent(1,&packet->data);
+    FSR4_ViewsInUse(0);
+    Stats stats{}; FSR4_GetStats(&stats);
+    if(FSR4_Failed()) renderFailed=true;
+    completed.fetch_add(1);
+}
+
+void Init(P camera,P additional,bool resolve,P cd,M mi) {
+    originalInit(camera,additional,resolve,cd,mi);
+    if(!enabled||renderFailed||!additional||!At<bool>(additional,field.postEnabled)) return;
+    // URP fills CameraData.resolveFinalTarget and renderType after this call.
+    try {
+        if(!frame_math::SceneCamera(At<int>(cd,field.type)==1,At<int>(additional,field.additionalType)==0,
+            resolve,At<bool>(cd,field.xr),api.Value<bool>(method.orthographic,camera))) return;
+        P stack=At<P>(additional,field.cameraStack);
+        if(stack&&At<int>(stack,api.Offset(api.object_get_class(stack),"_size"))>0) return;
+        if(api.Value<bool>(method.dynamicResolution,camera)) return;
+        int dw=At<int>(cd,field.pixelW),dh=At<int>(cd,field.pixelH);
+        if(P target=At<P>(cd,field.target)) {
+            if(!frame_math::SupportedTarget(api.Value<int>(method.targetDimension,target),
+                api.Value<int>(method.targetSamples,target),api.Value<bool>(method.targetDynamic,target))) return;
+            if(dw!=api.Value<int>(method.width,target)||dh!=api.Value<int>(method.height,target)) return;
+        }
+        if(dw<320||dh<240) return;
+        const bool offscreen=At<P>(cd,field.target)!=nullptr;
+        int w=frame_math::RenderSize(dw,options.ratio),h=frame_math::RenderSize(dh,options.ratio);
+        int frame=api.Value<int>(method.frame),id=api.Value<int>(method.id,camera);
+        if (!primaryCamera.Allow(id,frame)) return;
+        if(frame!=configuredFrame) { configuredFrame=frame;configuredCameras.clear(); }
+        if(configuredCameras.size()>=32) return;
+        configuredCameras.push_back(id);
+        P desc=static_cast<char*>(cd)+field.descriptor;
+        auto matrix=reinterpret_cast<float*>(static_cast<char*>(cd)+field.matrix);
+        const float oldJitterX=matrix[12],oldJitterY=matrix[13];
+        const int oldW=At<int>(desc,field.descWidth),oldH=At<int>(desc,field.descHeight);
+        const int oldAA=At<int>(cd,field.aa);
+        At<int>(desc,field.descMsaa)=1;
+        At<int>(cd,field.aa)=3;
+        At<float>(cd,field.scale)=1/options.ratio;
+        At<int>(cd,field.scaling)=options.ratio>1?1:0;
+        // Keep the offscreen source at render resolution until the resolve hook.
+        At<int>(cd,field.filter)=offscreen?0:2;
+        At<int>(desc,field.descWidth)=w;
+        At<int>(desc,field.descHeight)=h;
+        auto taa=static_cast<char*>(cd)+field.taaSettings;
+        const auto jitter=RepairTaaJitter(oldJitterX,oldJitterY,oldW,oldH,w,h,frame,
+            At<int>(taa,field.taaOffset),At<float>(taa,field.taaJitter),
+            SelectJitterPhaseCount(options.jitterPhaseMode,options.ratio));
+        matrix[12]=jitter.x;matrix[13]=jitter.y;
+        static bool reported=false;
+        if(!reported) { reported=true; Log("Configured first scene camera for FSR 4: "+
+            std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)+
+            (At<P>(cd,field.target)?" (RenderTexture)":" (screen)")+
+            "; original AA "+std::to_string(oldAA)+", jitter scale "+std::to_string(At<float>(taa,field.taaJitter))+
+            ", jitter matrix offset "+std::to_string(oldJitterX)+","+std::to_string(oldJitterY)+
+            " -> "+std::to_string(jitter.x)+","+std::to_string(jitter.y)); }
+        static bool reportedBias=false;
+        if(!reportedBias&&options.ratio>1) { reportedBias=true;Log("FSR recommended Mip LOD bias at ratio "+
+            std::to_string(options.ratio)+": "+std::to_string(RecommendedFsrMipBias(options.ratio))+
+            "; informational only (Unity URP may already apply a global Mip Bias)"); }
+    } catch(const std::exception& e) { Stop(e.what()); }
+}
+
+void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool beforePost=false);
+
+void QueueFrameFromSource(ResourceUse& use,P cmd,P cd,P source,int w,int h,int dw,int dh) {
+    resources.Ensure(w,h,dw,dh);
+    use.Begin(cmd);
+    BlitCamera(cmd,source,resources.color.handle.Get());
+    QueueFrame(use,cd,w,h,dw,dh);
+}
+
+void Taa(P cmd,P material,P cd,P src,P dst,P motion,M mi) {
+    if(!enabled||renderFailed||!motion||!At<bool>(cd,field.resolve)) {
+        originalTaa(cmd,material,cd,src,dst,motion,mi); return;
+    }
+    ResourceUse use;
+    static int blockedCamera=0,retryFrame=0;
+    int frame=0,id=0;
+    const bool offscreen=At<P>(cd,field.target)!=nullptr;
+    const bool earlyNativeAA=frame_math::EarlyNativeAA(offscreen,options.ratio);
+    const char* stage="camera validation";
+    try {
+        frame=api.Value<int>(method.frame);
+        id=api.Value<int>(method.id,At<P>(cd,field.camera));
+        if(frame!=configuredFrame||std::find(configuredCameras.begin(),configuredCameras.end(),id)==configuredCameras.end()) {
+            originalTaa(cmd,material,cd,src,dst,motion,mi);return;
+        }
+        if((offscreen || earlyNativeAA) && (!frame_math::RetryCamera(id,blockedCamera,frame,retryFrame) ||
+            !src || !dst || !LiveTexture(At<P>(src,field.rt)) ||
+            !LiveTexture(At<P>(dst,field.rt)) || !LiveTexture(motion))) {
+            originalTaa(cmd,material,cd,src,dst,motion,mi);
+            return;
+        }
+        P desc=static_cast<char*>(cd)+field.descriptor;
+        int w=At<int>(desc,field.descWidth),h=At<int>(desc,field.descHeight);
+        auto matrix=reinterpret_cast<const float*>(static_cast<char*>(cd)+field.matrix);
+        capture.camera=Root(At<P>(cd,field.camera)); capture.motion=Root(motion);
+        capture.frame=frame;
+        capture.id=id;
+        capture.earlyNativeAA=false;
+        capture.jitterX=frame_math::Jitter(matrix[12],w,options.jitterXSign);
+        capture.jitterY=frame_math::Jitter(matrix[13],h,options.jitterYSign);
+        if((offscreen || earlyNativeAA) && options.ratio==1.0f) {
+            if(w!=At<int>(cd,field.pixelW) || h!=At<int>(cd,field.pixelH)) {
+                capture.frame=-1;
+                originalTaa(cmd,material,cd,src,dst,motion,mi);
+                return;
+            }
+            auto sourceTex=At<P>(src,field.rt),destinationTex=At<P>(dst,field.rt);
+            if(!frame_math::NativeSurfaceDimensions(
+                api.Value<int>(method.width,sourceTex),api.Value<int>(method.height,sourceTex),
+                api.Value<int>(method.width,destinationTex),api.Value<int>(method.height,destinationTex),w,h)) {
+                capture.frame=-1;
+                static bool warned=false;
+                if(!warned) { warned=true; Log("Native AA TAA RTHandle dimensions differ from the camera descriptor; using game TAA",GAKU_LOG_WARNING); }
+                originalTaa(cmd,material,cd,src,dst,motion,mi);
+                return;
+            }
+            stage="allocate frame textures";
+            resources.InvalidateDeadColorSurfaces();
+            resources.Ensure(w,h,w,h);
+            use.Begin(cmd);
+            stage="copy scene color";
+            BlitCamera(cmd,src,resources.color.handle.Get());
+            stage="queue FSR frame";
+            QueueFrame(use,cd,w,h,w,h,earlyNativeAA);
+            stage="copy FSR output";
+            BlitCamera(cmd,resources.output.handle.Get(),dst);
+            capture.earlyNativeAA=earlyNativeAA;
+            if(blockedCamera==id && retryFrame>0) {
+                retryFrame=0;
+                Log("Resumed FSR 4 Native AA after a frame fallback");
+            }
+            static bool queuedOffscreen=false,queuedEarly=false;
+            bool& queued=earlyNativeAA?queuedEarly:queuedOffscreen;
+            if(!queued) { queued=true; Log(earlyNativeAA ?
+                "Queued first screen NativeAA frame before post-processing" :
+                "Queued first FSR 4 Native AA frame in the TAA pass"); }
+        } else {
+            BlitCamera(cmd,src,dst);
+        }
+        static bool reported=false;
+        if(!reported) {
+            reported=true;
+            Log("Captured first camera motion vectors; FSR jitter "+std::to_string(capture.jitterX)+","+
+                std::to_string(capture.jitterY)+" px");
+        }
+        return;
+    } catch(const ManagedFailure& e) {
+        if((offscreen || earlyNativeAA) && id!=0) {
+            blockedCamera=id;
+            retryFrame=frame+30;
+            history.frame=-1;
+            capture.frame=-1;
+            Log(std::string(stage)+": "+e.what()+"; using game TAA for this camera before retrying",GAKU_LOG_WARNING);
+        } else Stop(e.what());
+    } catch(const std::exception& e) { Stop(e.what()); }
+    originalTaa(cmd,material,cd,src,dst,motion,mi);
+}
+
+void QueueFrame(const ResourceUse& use,P cd,int w,int h,int dw,int dh,bool beforePost) {
+    P cmd=use.cmd;
+    Blit(cmd,nullptr,resources.depth.texture.Get(),true);
+    Blit(cmd,capture.motion.Get(),resources.motion.texture.Get());
+    // A failed FSR dispatch leaves a valid spatially scaled frame, never uninitialized memory.
+    Blit(cmd,resources.color.texture.Get(),resources.output.texture.Get());
+    auto packet=std::make_unique<Packet>();
+    auto& fd=packet->data;
+    fd.color=resources.color.native;fd.depth=resources.depth.native;
+    fd.motion=resources.motion.native;fd.output=resources.output.native;
+    // On the screen-camera path this command is recorded in RenderFinalPass,
+    // before later overlay UI may be drawn to the game's swap chain. Expose the
+    // pre-overlay FSR output for HUDless/UI composition validation. Whether
+    // every in-game canvas is absent must still be verified in the target game.
+    fd.hudless=frameGeneration && !beforePost && !At<P>(cd,field.target) ? fd.output : nullptr;
+    P pointers[]{fd.color,fd.depth,fd.motion,fd.output};
+    for(int i=0;i<4;++i) packet->textures[i]=static_cast<ID3D11Resource*>(pointers[i]);
+    fd.renderW=w;fd.renderH=h;fd.displayW=dw;fd.displayH=dh;
+    fd.maxRenderW=w;fd.maxRenderH=h;
+    fd.jitterX=capture.jitterX;fd.jitterY=capture.jitterY;
+    fd.mvScaleX=-static_cast<float>(w);fd.mvScaleY=frame_math::MotionVectorYScale(h,options.motionVectorYSign);
+    fd.frameTimeMs=(std::max)(0.1f,api.Value<float>(method.time)*1000);
+    fd.cameraNear=api.Value<float>(method.nearPlane,capture.camera.Get());
+    fd.cameraFar=api.Value<float>(method.farPlane,capture.camera.Get());
+    float fov=api.Value<float>(method.fov,capture.camera.Get());
+    // The game exposure is not captured by this integration. Zero tells the
+    // bridge to retain SDK auto exposure rather than fabricating 1.0.
+    fd.fovV=fov*0.01745329252f;fd.sharpness=options.sharpness;fd.exposure=0;
+    fd.createFlags=FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+    if(frame_math::FsrInputIsHdr(At<bool>(cd,field.hdr),At<P>(cd,field.target)!=nullptr,beforePost)) fd.createFlags|=FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    if(api.Value<bool>(method.reversed)) fd.createFlags|=FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
+    using Vec3=std::array<float,3>;
+    P transform=api.Invoke(method.transform,capture.camera.Get());
+    auto pos=api.Value<Vec3>(method.position,transform);
+    auto forward=api.Value<Vec3>(method.forward,transform);
+    fd.reset=frame_math::Reset(capture.id,history.id,capture.frame,history.frame,fov,history.fov,pos.data(),history.pos)||
+        history.w!=w||history.h!=h||frame_math::RotationJump(forward.data(),history.forward);
+    auto taa=static_cast<char*>(cd)+field.taaSettings;
+    fd.reset|=At<int>(taa,field.reset)>0;
+    const bool manualHistoryReset=options.ratio==1.0f && nativeHistoryResetRequested.exchange(false);
+    if(manualHistoryReset) fd.reset=true;
+    if(frameGeneration) {
+        fd.fg=1;
+        std::copy(pos.begin(),pos.end(),fd.camPos);
+        std::copy(forward.begin(),forward.end(),fd.camFwd);
+        for(auto [getter,dst]:{std::pair{method.up,fd.camUp},std::pair{method.right,fd.camRight}}) {
+            auto axis=api.Value<Vec3>(getter,transform);
+            std::copy(axis.begin(),axis.end(),dst);
+        }
+    }
+    // A plugin event may consume/destroy the packet as soon as it is queued.
+    // Keep diagnostics independent of its lifetime.
+    const bool queuedReset=fd.reset!=0;
+    const float queuedJitterX=fd.jitterX,queuedJitterY=fd.jitterY;
+    const bool queuedHdr=(fd.createFlags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE)!=0;
+    if(!renderWork.Attach(use.id,std::move(packet))) {
+        if(manualHistoryReset) nativeHistoryResetRequested.store(true);
+        return;
+    }
+    try {
+        QueuePluginEvent(method.event,At<P>(cmd,field.commandBufferPtr),
+            reinterpret_cast<P>(&RenderEvent),1,reinterpret_cast<P>(use.id));
+    } catch(...) {
+        renderWork.Take(use.id);
+        if(manualHistoryReset) nativeHistoryResetRequested.store(true);
+        throw;
+    }
+    history.id=capture.id;history.frame=capture.frame;history.fov=fov;history.w=w;history.h=h;
+    std::copy(pos.begin(),pos.end(),history.pos);
+    std::copy(forward.begin(),forward.end(),history.forward);
+    if(options.ratio==1.0f) {
+        if(beforePost) ++nativeEarlyQueued;
+        else if(At<P>(cd,field.target)) ++nativeOffscreenQueued;
+        else ++nativeFinalQueued;
+        if(queuedReset) ++nativeResetsQueued;
+        nativeLastJitterX.store(queuedJitterX);
+        nativeLastJitterY.store(queuedJitterY);
+        nativeLastInputHdr.store(queuedHdr);
+    }
+}
+
+void Final(P self,P cmd,P rd,M mi) {
+    ResourceUse use;
+    P cd=static_cast<char*>(rd)+field.renderCamera;
+    struct Restore {
+        P cd,self,source=nullptr;
+        bool swap=false,active=false;
+        std::vector<char> saved;
+        ~Restore() {
+            if(!active) return;
+            memcpy(cd,saved.data(),saved.size());
+            At<P>(self,field.source)=source;At<bool>(self,field.swap)=swap;
+        }
+    } restore{cd,self};
+    try {
+        if(enabled && !renderFailed && !At<P>(cd,field.target) && At<bool>(cd,field.resolve) && capture.frame==api.Value<int>(method.frame) &&
+           capture.id==api.Value<int>(method.id,At<P>(cd,field.camera))) {
+            P output=nullptr;
+            int dw=0,dh=0;
+            P desc=static_cast<char*>(cd)+field.descriptor;
+            if(!capture.earlyNativeAA) {
+                P source=At<P>(self,field.source);
+                if(At<bool>(self,field.swap)) {
+                    P renderer=At<P>(cd,field.renderer);
+                    if(!method.getBackBuffer) method.getBackBuffer=api.Method(api.object_get_class(renderer),"GetCameraColorBackBuffer",{"UnityEngine.Rendering.CommandBuffer"});
+                    source=api.Invoke(method.getBackBuffer,renderer,{cmd});
+                }
+                P sourceTexture=source?At<P>(source,field.rt):nullptr;
+                if(!sourceTexture) throw std::runtime_error("Final source has no RenderTexture");
+                int w=api.Value<int>(method.width,sourceTexture),h=api.Value<int>(method.height,sourceTexture);
+                dw=At<int>(cd,field.pixelW);dh=At<int>(cd,field.pixelH);
+                if(w!=At<int>(desc,field.descWidth)||h!=At<int>(desc,field.descHeight))
+                    throw std::runtime_error("Scaled RTHandles are not supported by this integration");
+                QueueFrameFromSource(use,cmd,cd,source,w,h,dw,dh);
+                output=resources.output.handle.Get();
+            }
+
+            restore.saved.assign(static_cast<char*>(cd),static_cast<char*>(cd)+field.cameraSize);
+            restore.source=At<P>(self,field.source);restore.swap=At<bool>(self,field.swap);
+            restore.active=true;
+            if(output) {
+                At<P>(self,field.source)=output;At<bool>(self,field.swap)=false;
+                At<int>(desc,field.descWidth)=dw;At<int>(desc,field.descHeight)=dh;
+                At<float>(cd,field.scale)=1;At<int>(cd,field.scaling)=0;
+            }
+            At<int>(cd,field.aa)=0;
+        }
+    } catch(const std::exception& e) { Stop(e.what()); }
+    originalFinal(self,cmd,rd,mi);
+}
+
+void ResolveBlit(P cmd,P cd,P src,P dst,int load,int store,P material,int pass,M mi) {
+    ResourceUse use;
+    P input=src;
+    try {
+        if(enabled && !renderFailed && options.ratio>1 && capture.frame>=0 &&
+           At<P>(cd,field.target) && At<bool>(cd,field.resolve) &&
+           At<P>(cd,field.camera)==capture.camera.Get() &&
+           capture.frame==api.Value<int>(method.frame) && src && dst) {
+            P texture=At<P>(src,field.rt);
+            P desc=static_cast<char*>(cd)+field.descriptor;
+            int w=At<int>(desc,field.descWidth),h=At<int>(desc,field.descHeight);
+            int dw=At<int>(cd,field.pixelW),dh=At<int>(cd,field.pixelH);
+            if(LiveTexture(texture) && LiveTexture(capture.motion.Get()) &&
+               frame_math::UpscaleSource(api.Value<int>(method.width,texture),
+                   api.Value<int>(method.height,texture),w,h,dw,dh)) {
+                resources.InvalidateDeadColorSurfaces();
+                QueueFrameFromSource(use,cmd,cd,src,w,h,dw,dh);
+                input=resources.output.handle.Get();
+                capture.frame=-1;
+                static bool reported=false;
+                if(!reported) { reported=true; Log("Queued first FSR 4 upscale in camera resolve: "+
+                    std::to_string(w)+"x"+std::to_string(h)+" -> "+std::to_string(dw)+"x"+std::to_string(dh)); }
+            }
+        }
+    } catch(const ManagedFailure& e) {
+        capture.frame=-1;
+        history.frame=-1;
+        static bool reported=false;
+        if(!reported) { reported=true; Log(std::string("Camera resolve fallback: ")+e.what(),GAKU_LOG_WARNING); }
+    } catch(const std::exception& e) { Stop(e.what()); }
+    originalResolveBlit(cmd,cd,input,dst,load,store,material,pass,mi);
+}
+
+void Bind() {
+    api.Bind(static_cast<HMODULE>(runtime.getGameAssembly()));
+    P cd=api.Class("UnityEngine.Rendering.Universal","CameraData");
+    P rd=api.Class("UnityEngine.Rendering.Universal","RenderingData");
+    P desc=api.Class("UnityEngine","RenderTextureDescriptor");
+    P pass=api.Class("UnityEngine.Rendering.Universal","PostProcessPass");
+    P taa=api.Class("UnityEngine.Rendering.Universal","TemporalAA");
+    P pipeline=api.Class("UnityEngine.Rendering.Universal","UniversalRenderPipeline");
+    P additional=api.Class("UnityEngine.Rendering.Universal","UniversalAdditionalCameraData");
+    P handle=api.Class("UnityEngine.Rendering","RTHandle");
+    P cmd=api.Class("UnityEngine.Rendering","CommandBuffer");
+    P camera=api.Class("UnityEngine","Camera");
+    P texture=api.Class("UnityEngine","Texture");
+    method.rtClass=api.Class("UnityEngine","RenderTexture");
+    method.rtiClass=api.Class("UnityEngine.Rendering","RenderTargetIdentifier");
+#define VF(member,name) field.member=api.Offset(cd,name,true)
+    VF(camera,"camera");VF(type,"cameraType");VF(target,"targetTexture");VF(baseType,"renderType");
+    VF(hdr,"isHdrEnabled");VF(aa,"antialiasing");VF(descriptor,"cameraTargetDescriptor");
+    VF(pixelW,"pixelWidth");VF(pixelH,"pixelHeight");VF(scale,"renderScale");
+    VF(scaling,"imageScalingMode");VF(filter,"upscalingFilter");VF(taaSettings,"taaSettings");
+    VF(matrix,"m_JitterMatrix");VF(taaData,"taaPersistentData");VF(resolve,"resolveFinalTarget");VF(xr,"xrRendering");VF(renderer,"renderer");
+#undef VF
+    field.renderCamera=api.Offset(rd,"cameraData",true);
+    field.descWidth=api.Offset(desc,"<width>k__BackingField",true);
+    field.descHeight=api.Offset(desc,"<height>k__BackingField",true);
+    field.descMsaa=api.Offset(desc,"<msaaSamples>k__BackingField",true);
+    field.source=api.Offset(pass,"m_Source");field.swap=api.Offset(pass,"m_UseSwapBuffer");
+    field.postEnabled=api.Offset(additional,"m_RenderPostProcessing");field.rt=api.Offset(handle,"m_RT");
+    field.cameraStack=api.Offset(additional,"m_Cameras");
+    field.additionalType=api.Offset(additional,"m_CameraType");
+    field.commandBufferPtr=api.Offset(cmd,"m_Ptr");
+    field.objectPtr=api.Offset(api.Class("UnityEngine","Object"),"m_CachedPtr");
+    auto settingsField=api.class_get_field_from_name(cd,"taaSettings");
+    using FieldTypeFn=P(*)(P);using ClassTypeFn=P(*)(P);
+    auto ft=reinterpret_cast<FieldTypeFn>(GetProcAddress(static_cast<HMODULE>(runtime.getGameAssembly()),"il2cpp_field_get_type"));
+    auto ct=reinterpret_cast<ClassTypeFn>(GetProcAddress(static_cast<HMODULE>(runtime.getGameAssembly()),"il2cpp_class_from_type"));
+    if(!ft||!ct) throw std::runtime_error("Missing field type API");
+    P settings=ct(ft(settingsField));field.reset=api.Offset(settings,"resetHistoryFrames",true);
+    field.taaOffset=api.Offset(settings,"jitterFrameCountOffset",true);
+    field.taaJitter=api.Offset(settings,api.class_get_field_from_name(settings,"m_JitterScale")?"m_JitterScale":"jitterScale",true);
+    field.cameraSize=api.class_value_size(cd,nullptr);field.descSize=api.class_value_size(desc,nullptr);
+    field.rtiSize=api.class_value_size(method.rtiClass,nullptr);
+    if(field.cameraSize<256||field.cameraSize>4096||field.rtiSize>256||field.rtiSize<16)
+        throw std::runtime_error("Unexpected URP value type layout");
+    method.rtCtor=api.Method(method.rtClass,".ctor",{"System.Int32","System.Int32","System.Int32","UnityEngine.RenderTextureFormat","UnityEngine.RenderTextureReadWrite"});
+    method.rtCreate=api.Method(method.rtClass,"Create",{});method.rtRelease=api.Method(method.rtClass,"Release",{});
+    method.rtRandomWrite=api.Method(method.rtClass,"set_enableRandomWrite",{"System.Boolean"});
+    method.rtPtr=api.Method(texture,"GetNativeTexturePtr",{});
+    method.width=api.Method(method.rtClass,"get_width",{});method.height=api.Method(method.rtClass,"get_height",{});
+    method.targetDimension=api.Method(method.rtClass,"get_dimension",{});
+    method.targetSamples=api.Method(method.rtClass,"get_antiAliasing",{});
+    method.targetDynamic=api.Method(method.rtClass,"get_useDynamicScale",{});
+    method.rtHandleAlloc=api.Method(api.Class("UnityEngine.Rendering","RTHandles"),"Alloc",{"UnityEngine.RenderTexture"});
+    method.rtHandleRelease=api.Method(handle,"Release",{});
+    method.rtiTexture=api.Method(method.rtiClass,".ctor",{"UnityEngine.Texture"});
+    method.rtiId=api.Method(method.rtiClass,".ctor",{"System.Int32"});
+    method.blit=api.Method(cmd,"Blit",{"UnityEngine.Rendering.RenderTargetIdentifier","UnityEngine.Rendering.RenderTargetIdentifier"});
+    method.blitCamera=api.Method(api.Class("UnityEngine.Rendering","Blitter"),"BlitCameraTexture",
+        {"UnityEngine.Rendering.CommandBuffer","UnityEngine.Rendering.RTHandle","UnityEngine.Rendering.RTHandle","System.Single","System.Boolean"});
+    method.event=ResolvePluginEvent(api.resolve_icall);
+    method.nearPlane=api.Method(camera,"get_nearClipPlane",{});method.farPlane=api.Method(camera,"get_farClipPlane",{});
+    method.fov=api.Method(camera,"get_fieldOfView",{});method.id=api.Method(api.Class("UnityEngine","Object"),"GetInstanceID",{});
+    method.orthographic=api.Method(camera,"get_orthographic",{});
+    method.dynamicResolution=api.Method(camera,"get_allowDynamicResolution",{});
+    method.transform=api.Method(api.Class("UnityEngine","Component"),"get_transform",{});
+    auto transform=api.Class("UnityEngine","Transform");
+    method.position=api.Method(transform,"get_position",{});
+    method.forward=api.Method(transform,"get_forward",{});
+    if(frameGeneration) {
+        method.up=api.Method(transform,"get_up",{});
+        method.right=api.Method(transform,"get_right",{});
+    }
+    method.frame=api.Method(api.Class("UnityEngine","Time"),"get_frameCount",{});
+    method.time=api.Method(api.Class("UnityEngine","Time"),"get_unscaledDeltaTime",{});
+    P sys=api.Class("UnityEngine","SystemInfo");
+    method.reversed=api.Method(sys,"get_usesReversedZBuffer",{});method.device=api.Method(sys,"get_graphicsDeviceType",{});
+    if(api.Value<int>(method.device)!=2) throw std::runtime_error("This build supports the game's Direct3D 11 renderer only");
+    M init=api.Method(pipeline,"InitializeCameraData",{"UnityEngine.Camera","UnityEngine.Rendering.Universal.UniversalAdditionalCameraData","System.Boolean","UnityEngine.Rendering.Universal.CameraData&"});
+    M taaPass=api.Method(taa,"ExecutePass",{"UnityEngine.Rendering.CommandBuffer","UnityEngine.Material","UnityEngine.Rendering.Universal.CameraData&","UnityEngine.Rendering.RTHandle","UnityEngine.Rendering.RTHandle","UnityEngine.RenderTexture"});
+    M final=api.Method(pass,"RenderFinalPass",{"UnityEngine.Rendering.CommandBuffer","UnityEngine.Rendering.Universal.RenderingData&"});
+    M resolveBlit=api.Method(api.Class("UnityEngine.Rendering.Universal","RenderingUtils"),"FinalBlit",
+        {"UnityEngine.Rendering.CommandBuffer","UnityEngine.Rendering.Universal.CameraData&",
+         "UnityEngine.Rendering.RTHandle","UnityEngine.Rendering.RTHandle","UnityEngine.Rendering.RenderBufferLoadAction",
+         "UnityEngine.Rendering.RenderBufferStoreAction","UnityEngine.Material","System.Int32"});
+    GakuHookRequest requests[]{
+        {*static_cast<P const*>(init),reinterpret_cast<P>(&Init),reinterpret_cast<P*>(&originalInit)},
+        {*static_cast<P const*>(taaPass),reinterpret_cast<P>(&Taa),reinterpret_cast<P*>(&originalTaa)},
+        {*static_cast<P const*>(final),reinterpret_cast<P>(&Final),reinterpret_cast<P*>(&originalFinal)},
+        {*static_cast<P const*>(resolveBlit),reinterpret_cast<P>(&ResolveBlit),reinterpret_cast<P*>(&originalResolveBlit)},
+    };
+    if(hooks.acquireBatch(hooks.context,4,requests)!=GAKU_OK) throw std::runtime_error("Could not acquire URP hook batch");
+    Log("URP hooks installed. FSR 4 upscale ratio "+std::to_string(options.ratio)+
+        (frameGeneration?". Frame generation enabled.":". Frame generation disabled."));
+}
+
+void Tick(P,float) {
+    try {
+        resources.Reap();
+        if(enabled&&!attempted) { attempted=true; Bind(); }
+        char line[1024];for(int i=0;i<24&&FSR4_PollLog(line,sizeof line)>0;++i) Log(line);
+        if(renderFailed.exchange(false)) Stop("FSR backend failed (see bridge log)");
+        static bool reported=false;
+        static bool fgReported=false;
+        if(completed.load()&&(!reported||(frameGeneration&&!fgReported))) {
+            Stats stats{};FSR4_GetStats(&stats);
+            if(stats.frames&&!reported) { reported=true;Log(std::string("FSR active: ")+stats.provider); }
+            if(stats.fgGenerated&&!fgReported) {
+                fgReported=true;
+                Log(std::string("FSR Frame Generation active: ")+stats.fgProvider);
+            }
+        }
+    } catch(const std::exception& e) { Stop(e.what()); }
+}
+void Shutdown(P) {
+    enabled=false;
+    StopGameInputHook();
+    renderWork.CancelPackets();
+    primaryCamera.Reset();
+    capture.camera.Clear();capture.motion.Clear();
+    resources.ClearIdleRoots();
+    if(const auto pending=renderWork.Pending())
+        Log("Canceled queued FSR packets; keeping RTHandles for "+std::to_string(pending)+
+            " pending render commands until completion or process exit",GAKU_LOG_WARNING);
+}
+}

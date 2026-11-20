@@ -12,6 +12,11 @@ import statistics
 import sys
 from pathlib import Path
 
+if __package__:
+    from .frame_metrics import one_percent_low_fps, percentile
+else:
+    from frame_metrics import one_percent_low_fps, percentile
+
 
 LATENCIES = {
     "input": "MsAllInputToPhotonLatency",
@@ -31,14 +36,6 @@ def positive(row, name):
     except ValueError as exc:
         raise ValueError(f"invalid {name} value {value!r}") from exc
     return result if math.isfinite(result) and result > 0 else None
-
-
-def percentile(values, fraction):
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * fraction
-    low = math.floor(index)
-    high = math.ceil(index)
-    return ordered[low] + (ordered[high] - ordered[low]) * (index - low)
 
 
 def latency_stats(rows, name):
@@ -76,8 +73,7 @@ def analyze(path, warmup=0, latency_frames="application", slow_factor=1.5):
     mean = statistics.fmean(intervals)
     median = percentile(intervals, .5)
     slow = sum(value > median * slow_factor for value in intervals)
-    worst_count = max(1, math.ceil(len(intervals) * .01))
-    worst = statistics.fmean(sorted(intervals, reverse=True)[:worst_count])
+    stddev = statistics.pstdev(intervals)
     presents = [v for row in rows if (v := positive(row, "MsBetweenPresents")) is not None]
     frame_types = [(row.get("FrameType") or "").strip().lower() for row in rows]
     application = [row for row, typ in zip(rows, frame_types) if typ in ("application", "app")]
@@ -100,13 +96,13 @@ def analyze(path, warmup=0, latency_frames="application", slow_factor=1.5):
         "application_frames": len(application),
         "unknown_frames": unknown,
         "avg_display_fps": 1000 / mean,
-        "one_percent_low_fps": 1000 / worst,
+        "one_percent_low_fps": one_percent_low_fps(intervals),
         "display_p50_ms": median,
         "display_p95_ms": percentile(intervals, .95),
         "display_p99_ms": percentile(intervals, .99),
         "display_max_ms": max(intervals),
-        "display_stddev_ms": statistics.pstdev(intervals),
-        "display_cv_pct": statistics.pstdev(intervals) * 100 / mean,
+        "display_stddev_ms": stddev,
+        "display_cv_pct": stddev * 100 / mean,
         "slow_gap_pct": 100 * slow / len(intervals),
         "present_p99_ms": percentile(presents, .99) if presents else None,
         "latency_scope": scope,

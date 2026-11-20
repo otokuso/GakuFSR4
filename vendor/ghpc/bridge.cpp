@@ -1,3 +1,4 @@
+// GPL-3.0: the D3D11/D3D12 bridge is from marsattackk/GHPC-FSR4.
 #include <windows.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -24,7 +25,10 @@
 #include "ffx_upscale.h"
 #include "ffx_framegeneration.h"
 #include "../../src/FsrProvider.h"
-#include "../../src/BridgeStats.h"
+#define GAKU_FSR_BRIDGE_IMPLEMENTATION
+#include "../../src/FsrBridge.h"
+#undef GAKU_FSR_BRIDGE_IMPLEMENTATION
+#include "../../src/PresentHook.h"
 #include "../../src/FgErrorBurst.h"
 #include "../../src/FgRetry.h"
 #include "../../src/FgViewportMath.h"
@@ -37,35 +41,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-#define EXPORT extern "C" __declspec(dllexport)
-
-void InstallPresentHook(ID3D11Resource* anchor);
-bool PresentHooked();
-uint64_t PresentsSeen();
-
-struct FrameData
-{
-	void* color;
-	void* depth;
-	void* motion;
-	void* output;
-	uint32_t renderW, renderH, displayW, displayH;
-	float jitterX, jitterY, mvScaleX, mvScaleY;
-	float frameTimeMs, cameraNear, cameraFar, fovV;
-	float sharpness;
-	int32_t reset;
-	uint32_t createFlags, dispatchFlags;
-	float exposure;
-	uint32_t direct;
-	uint32_t maxRenderW, maxRenderH;
-	void* hudless;
-	uint32_t fg;
-	float camPos[3], camUp[3], camRight[3], camFwd[3];
-};
-
 static_assert(sizeof(void*) == 8, "64-bit only");
-static_assert(sizeof(FrameData) == 176, "FrameData changed: update Native.cs, kFrameFields and this size");
-static_assert(sizeof(Stats) == 680, "Stats changed: update Native.cs, kStatsFields and this size");
 
 struct LayoutField { const char* name; uint32_t offset; };
 #define LF(T, f) { #f, (uint32_t)offsetof(T, f) }
@@ -1316,11 +1292,12 @@ namespace
 		}
 		Publish();
 	}
-	void __stdcall OnRenderEvent(int eventId, void* data)
-	{
-		std::lock_guard<std::mutex> lock(g_renderLock);
-		RunRenderEvent(eventId, data);
-	}
+}
+
+void __stdcall OnRenderEvent(int eventId, void* data)
+{
+	std::lock_guard<std::mutex> lock(g_renderLock);
+	RunRenderEvent(eventId, data);
 }
 
 void BridgeLog(const char* fmt, ...)
@@ -1332,8 +1309,6 @@ void BridgeLog(const char* fmt, ...)
 	va_end(a);
 	Log("%s", buf);
 }
-
-ID3D12CommandQueue* BridgeQueue() { return g.queue.Get(); }
 
 HRESULT CreateNativeSwapchain(IDXGIFactory2* factory, ID3D11Device* device, HWND window, DXGI_SWAP_CHAIN_DESC1& desc,
 	const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen, NativeSwapchainState& state)
@@ -1575,7 +1550,7 @@ HRESULT PresentNativeSwapchain(NativeSwapchainState& state, ID3D11Texture2D* sou
 	return hr;
 }
 
-EXPORT int FSR4_SetFgRadialDistortion(float k1, float k2, float centerX, float centerY)
+int FSR4_SetFgRadialDistortion(float k1, float k2, float centerX, float centerY)
 {
 	// Called during plugin activation, before any render thread is scheduled.
 	if (g.submits || !std::isfinite(k1) || !std::isfinite(k2) ||
@@ -1587,7 +1562,7 @@ EXPORT int FSR4_SetFgRadialDistortion(float k1, float k2, float centerX, float c
 	return 1;
 }
 
-EXPORT int FSR4_Load(const wchar_t* dir)
+int FSR4_Load(const wchar_t* dir)
 {
 	if (g.loaded) return 1;
 	std::wstring d(dir);
@@ -1602,7 +1577,7 @@ EXPORT int FSR4_Load(const wchar_t* dir)
 	return 1;
 }
 
-EXPORT int FSR4_SetProviderVersion(const char* version)
+int FSR4_SetProviderVersion(const char* version)
 {
 	if (g.providersListed || g.fsr || !version) return 0;
 	if (!*version) { g.wantProvider = "4."; return 1; }
@@ -1612,7 +1587,7 @@ EXPORT int FSR4_SetProviderVersion(const char* version)
 	return 1;
 }
 
-EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
+int FSR4_LoadFrameGeneration(const wchar_t* dir)
 {
 	if (!g.fgDll) {
 		std::wstring d(dir);
@@ -1627,16 +1602,16 @@ EXPORT int FSR4_LoadFrameGeneration(const wchar_t* dir)
 	return 1;
 }
 
-EXPORT void FSR4_SetFgViewportOverride(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+void FSR4_SetFgViewportOverride(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
 {
 	std::lock_guard<std::mutex> lock(g_renderLock);
 	g.fgViewportOverride = {x,y,width,height};
 	g.fgViewportOverrideEnabled = width && height;
 }
 
-EXPORT void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
+void* FSR4_GetRenderEventFunc() { return (void*)&OnRenderEvent; }
 
-EXPORT int FSR4_PollLog(char* buf, int cap)
+int FSR4_PollLog(char* buf, int cap)
 {
 	std::lock_guard<std::mutex> l(g_logLock);
 	if (cap <= 0) return 0;
@@ -1654,10 +1629,10 @@ EXPORT int FSR4_PollLog(char* buf, int cap)
 	return n;
 }
 
-EXPORT const char* FSR4_GetLastFgSkipReason() { return g_fgSkipReason.load(); }
+const char* FSR4_GetLastFgSkipReason() { return g_fgSkipReason.load(); }
 extern "C" bool FSR4_UsesNativeSwapchain() { return g_nativeSwapchainActive.load(); }
 
-EXPORT void FSR4_GetDafpDiagnostics(DafpDiagnostics* out)
+void FSR4_GetDafpDiagnostics(DafpDiagnostics* out)
 {
 	if (!out) return;
 	DafpDiagnostics snapshot{};
@@ -1675,7 +1650,7 @@ EXPORT void FSR4_GetDafpDiagnostics(DafpDiagnostics* out)
 	*out = snapshot;
 }
 
-EXPORT void FSR4_GetStats(Stats* out)
+void FSR4_GetStats(Stats* out)
 {
 	if (!out) return;
 	{
@@ -1687,7 +1662,7 @@ EXPORT void FSR4_GetStats(Stats* out)
 	out->logDropped = g_logDropped;
 }
 
-EXPORT int FSR4_LayoutField(int which, int i, const char** name, uint32_t* offset)
+int FSR4_LayoutField(int which, int i, const char** name, uint32_t* offset)
 {
 	if (!name || !offset || which < 0 || which > 1) return 0;
 	const LayoutField* f = which == 0 ? kFrameFields : kStatsFields;
@@ -1699,18 +1674,18 @@ EXPORT int FSR4_LayoutField(int which, int i, const char** name, uint32_t* offse
 	return 1;
 }
 
-EXPORT int FSR4_Failed() { return g.fatal ? 2 : g.failed ? 1 : 0; }
+int FSR4_Failed() { return g.fatal ? 2 : g.failed ? 1 : 0; }
 
-EXPORT int FSR4_ExposureWanted() { return g.exposureRequired ? 1 : 0; }
+int FSR4_ExposureWanted() { return g.exposureRequired ? 1 : 0; }
 
-EXPORT uint64_t FSR4_GetViews(void** color, void** motion, void** output)
+uint64_t FSR4_GetViews(void** color, void** motion, void** output)
 {
 	std::lock_guard<std::mutex> l(g_viewLock);
 	*color = g.color.srv.Get(); *motion = g.motion.srv.Get(); *output = g.output.srv.Get();
 	return *color && *motion && *output ? g_viewGen : 0;
 }
 
-EXPORT uint64_t FSR4_GetHudlessView(void** hudless)
+uint64_t FSR4_GetHudlessView(void** hudless)
 {
 	if (!hudless) return 0;
 	std::lock_guard<std::mutex> l(g_viewLock);
@@ -1718,7 +1693,7 @@ EXPORT uint64_t FSR4_GetHudlessView(void** hudless)
 	return *hudless ? g_viewGen : 0;
 }
 
-EXPORT void FSR4_ViewsInUse(uint64_t gen)
+void FSR4_ViewsInUse(uint64_t gen)
 {
 	std::lock_guard<std::mutex> l(g_viewLock);
 	g_viewTicks++;
@@ -1732,4 +1707,4 @@ EXPORT void FSR4_ViewsInUse(uint64_t gen)
 	}
 }
 
-EXPORT void FSR4_ClearFailure() { if (!g.fatal) g.failed = false; }
+void FSR4_ClearFailure() { if (!g.fatal) g.failed = false; }
